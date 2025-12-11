@@ -1,0 +1,4147 @@
+---
+title: "IOBP2_figures_new1202"
+author: "Denise, Margaret, Fisher"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: 
+  html_document:
+    #toc: true
+    #toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+library(tidyverse)
+library(readr)
+library(tidyverse)
+library(KernSmooth)
+library(transport)
+library(dplyr)
+library(pracma)
+library(stats)
+library(purrr)
+library(patchwork)
+library(DT)
+library(shiny)
+library(ggplot2)
+library(dplyr)
+library(stats)
+library(shinyWidgets)
+library(plotly)
+library(dplyr)
+library(ggsci)
+library(np)
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+library(KernSmooth)
+library(transport)
+library(dplyr)
+library(pracma)
+library(stats)
+library(purrr)
+library(patchwork)
+library(DT)
+library(shiny)
+library(ggplot2)
+library(dplyr)
+library(stats)
+library(shinyWidgets)
+library(plotly)
+library(dplyr)
+library(ggsci)
+library(np)
+library(knitr)
+library(kableExtra)
+library(caret)
+library(glmnet)
+library(lubridate)
+```
+
+
+### Reload data
+```{r, eval=FALSE}
+dir_folder = "cgm data/IOBP2_data/"
+PtRoster <- read.delim(paste0(dir_folder, "IOBP2PtRoster.txt"), sep = "|", header = TRUE, stringsAsFactors = FALSE)
+
+IOBP2excomClarityCGM <- read.delim(paste0(dir_folder, "IOBP2DeviceCGM.txt"), sep = "|", header = TRUE, stringsAsFactors = FALSE) 
+
+
+iobp2 = IOBP2excomClarityCGM[,-c(1,4,5,7,8)] %>% left_join(PtRoster[,c(2,5,7,8)])
+
+library(lubridate)
+iobp2$DeviceDtTm <- as.POSIXct(iobp2$DeviceDtTm, format = "%m/%d/%Y %I:%M:%S %p", tz = "UTC")
+iobp2$RandDt <- as.POSIXct(iobp2$RandDt, format = "%m/%d/%Y %I:%M:%S %p", tz = "UTC")
+iobp2$AgeAsofEnrollDt = as.numeric(iobp2$AgeAsofEnrollDt)
+iobp2$TrtGroup = as.factor(iobp2$TrtGroup)
+
+iobp2 = iobp2 %>%
+  # Classify age group
+  mutate(Peds_age = if_else(AgeAsofEnrollDt >= 18, "adults", "children")) %>%
+  filter(TrtGroup != "BPFiasp")
+
+expected_points_per_week <- 288 * 7 * 4  # 288 intervals/day * 7 days
+
+# Prepare the data (exactly 13 weeks from first measurement after RandDt)
+rct = iobp2 %>% filter(DeviceDtTm >= RandDt & DeviceDtTm <=RandDt + weeks(12))
+
+
+saveRDS(iobp2, "iobp2_clean_24hdev.rds")
+```
+
+### Keep 80% in all 0-4, 4-8, 8-12
+```{r}
+library(dplyr)
+library(lubridate)
+
+iobp2 = readRDS("iobp2_clean_24hdev.rds")
+rct = iobp2 %>% filter(DeviceDtTm >= RandDt & DeviceDtTm <=RandDt + weeks(12))
+# Expected number of CGM points per 4-week period
+expected_points_per_period <- 288 * 7 * 4  # 288 points/day * 7 days/week * 4 weeks = 8064 points
+expected_points_per_day <- 288
+expected_points_per_week = 288*7
+# Prepare data (exactly 12 weeks from first measurement after RandDt, 3 periods: 1-4, 5-8, 9-12)
+rct_filtered <- rct %>%
+  filter(DeviceDtTm >= RandDt, TrtGroup %in% c("Control", "BP")) %>%
+  mutate(
+    Peds_age = if_else(AgeAsofEnrollDt >= 18, "adults", "children")
+  ) %>%
+  group_by(PtID) %>%
+  mutate(
+    #Start_time = min(DeviceDtTm),
+    Period = case_when(
+      DeviceDtTm >= RandDt & DeviceDtTm < RandDt + weeks(4) ~ "Weeks 1-4",
+      DeviceDtTm >= RandDt + weeks(4) & DeviceDtTm < RandDt + weeks(8) ~ "Weeks 5-8",
+      DeviceDtTm >= RandDt + weeks(8) & DeviceDtTm < RandDt + weeks(12) ~ "Weeks 9-12",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Period)) %>%
+  ungroup()
+
+
+rct_filtered_all <- rct %>%
+  filter(DeviceDtTm >= RandDt, TrtGroup %in% c("Control", "BP")) %>%
+  mutate(
+    Peds_age = if_else(AgeAsofEnrollDt >= 18, "adults", "children")
+  ) %>%
+  group_by(PtID) %>%
+  mutate(
+    #Start_time = min(DeviceDtTm),
+    Period = case_when(
+      DeviceDtTm >= RandDt & DeviceDtTm < RandDt + weeks(12) ~ "Weeks 1-12",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Period)) %>%
+  ungroup()
+
+
+# Count actual points per patient per period
+coverage_summary <- rct_filtered %>%
+  group_by(PtID, TrtGroup, Peds_age, Period) %>%
+  summarise(
+    actual_points = n(),
+    percent_available = actual_points / expected_points_per_period * 100,
+    .groups = "drop"
+  )
+
+coverage_summary_all <- rct_filtered_all %>%
+  group_by(PtID, TrtGroup, Peds_age, Period) %>%
+  summarise(
+    actual_points = n(),
+    percent_available = actual_points / expected_points_per_period * 100,
+    .groups = "drop"
+  )
+
+# Filter patients with ≥80% coverage in all three periods
+patients_good_coverage <- coverage_summary %>%
+  filter(percent_available >= 80) %>%
+  group_by(PtID, TrtGroup, Peds_age) %>%
+  summarise(
+    num_good_periods = n(),
+    .groups = "drop"
+  ) %>%
+  filter(num_good_periods == 3)
+
+# Final filtered data
+final_filtered_data <- rct_filtered %>%
+  filter(PtID %in% patients_good_coverage$PtID)
+
+# Count remaining patients in each group
+final_patient_counts <- patients_good_coverage %>%
+  group_by(TrtGroup, Peds_age) %>%
+  summarise(
+    num_patients_remaining = n(),
+    .groups = "drop"
+  )
+
+
+# Baseline data processing
+baseline_dates <- iobp2 %>%
+  filter(DeviceDtTm < RandDt) %>%
+  group_by(PtID, RandDt) %>%
+  summarise(start_date = min(DeviceDtTm), .groups = "drop") %>%
+  mutate(days_in_baseline = as.numeric(difftime(RandDt, start_date, units = "days")))
+
+baseline <- iobp2 %>%
+  filter(DeviceDtTm < RandDt) %>%
+  left_join(baseline_dates, by = c("PtID", "RandDt")) %>%
+  mutate(Rct_period = "Baseline")
+
+points_baseline <- baseline %>%
+  group_by(PtID, Rct_period, TrtGroup, Peds_age, days_in_baseline) %>%
+  summarise(actual_points = n(), .groups = "drop") %>%
+  mutate(
+    expected_points = days_in_baseline * expected_points_per_day,
+    percent_available = actual_points / expected_points * 100,
+    percent_missing = 100 - percent_available
+  )
+
+### two cutoff
+limited_id = intersect(patients_good_coverage$PtID, points_baseline %>% filter(actual_points > expected_points_per_week * 2) %>% pull(PtID))
+#limited_id = readRDS("iobp2_ids.rds")$limited_id
+bigger_id = patients_good_coverage$PtID
+
+```
+
+
+### Plot for missingness
+```{r, fig.height=25, fig.width=20}
+expected_points_per_day <- 288
+expected_points_per_week <- expected_points_per_day * 7
+
+points_rct <- rct_filtered %>%
+  group_by(PtID, Period, TrtGroup, Peds_age) %>%
+  summarise(actual_points = n(), .groups = "drop") %>%
+  mutate(
+    expected_points = expected_points_per_week * 4,
+    percent_available = actual_points / expected_points * 100,
+    percent_missing = 100 - percent_available
+  )
+
+points_rct_all <- rct_filtered_all %>%
+  group_by(PtID, Period, TrtGroup, Peds_age) %>%
+  summarise(actual_points = n(), .groups = "drop") %>%
+  mutate(
+    expected_points = expected_points_per_week * 12,
+    percent_available = actual_points / expected_points * 100,
+    percent_missing = 100 - percent_available
+  )
+
+# Combine baseline and RCT
+combined_points <- bind_rows(points_rct_all, points_rct)
+
+
+period_levels <- c("Weeks 1-12", "Weeks 1-4", "Weeks 5-8", "Weeks 9-12")
+
+
+# --- Step 1: Mark patients who have good coverage in ALL RCT periods ---
+patients_good_coverage <- points_rct %>%
+  filter(percent_available >= 80) %>%
+  group_by(PtID, TrtGroup, Peds_age) %>%
+  summarise(num_good_periods = n(), .groups = "drop") %>%
+  filter(num_good_periods == 3)
+
+# --- Step 2: Patient-level exclusion status (for whole row box) ---
+combined_points <- combined_points %>%
+  mutate(
+    excluded_individual = !(PtID %in% patients_good_coverage$PtID)
+  )
+
+# --- Step 3: Pre-compute the coordinates for boxes (whole rows) ---
+row_boxes <- combined_points %>%
+  filter(excluded_individual) %>%
+  distinct(PtID, TrtGroup, Peds_age) %>%
+  mutate(
+    y = reorder(factor(PtID), -as.numeric(as.character(PtID)))
+  )
+
+all_patients <- combined_points %>% distinct(PtID, TrtGroup, Peds_age)
+all_periods <- tibble(Period = period_levels)
+
+all_combos <- crossing(all_patients, all_periods)
+
+# Join your missingness data onto this full grid
+plot_data_full <- all_combos %>%
+  left_join(combined_points, by = c("PtID", "TrtGroup", "Peds_age", "Period")) %>%
+  mutate(
+    percent_missing = ifelse(is.na(percent_missing), 100, percent_missing), # Make fully missing = black
+    excluded_individual = ifelse(is.na(excluded_individual), TRUE, excluded_individual)
+  )
+
+# Calculate counts of original and excluded patients by treatment/age
+summary_counts <- plot_data_full %>%
+  group_by(TrtGroup, Peds_age) %>%
+  summarise(
+    N_original = n_distinct(PtID),
+    N_removed = n_distinct(PtID[excluded_individual])
+  ) %>%
+  ungroup()
+
+# Redefine plotting function to use this full data
+plot_missingness_points <- function(data, age_group, treatment, n_original, n_removed) {
+  plot_data <- data %>%
+    filter(Peds_age == age_group, TrtGroup == treatment)
+
+  box_patients <- plot_data %>%
+    filter(excluded_individual) %>%
+    distinct(PtID) %>%
+    pull(PtID)
+
+  ggplot(plot_data, aes(
+    x = factor(Period, levels = period_levels),
+    y = factor(PtID, levels = rev(sort(unique(PtID))))
+  )) +
+    geom_tile(aes(fill = percent_missing), color = "grey90") +
+    # Add gold box around the whole row for excluded individuals
+    geom_rect(
+      data = plot_data %>% filter(PtID %in% box_patients) %>% distinct(PtID),
+      inherit.aes = FALSE,
+      aes(
+        xmin = 0.5, xmax = length(period_levels) + 0.5,
+        ymin = as.numeric(factor(PtID, levels = rev(sort(unique(plot_data$PtID))))) - 0.5,
+        ymax = as.numeric(factor(PtID, levels = rev(sort(unique(plot_data$PtID))))) + 0.5
+      ),
+      color = "#d73027", fill = NA, linewidth = 1.2, linejoin = "mitre", alpha = 0.85
+    ) +
+    scale_fill_gradient2(
+      low = "white", mid = "darkgrey", high = "black",
+      midpoint = 20, limits = c(0, 100),
+      name = "Missingness (%)"
+    ) +
+    labs(
+      title = paste0("CGM Missingness: ", treatment, " - ", age_group,
+                     " (Original N = ", n_original, "; Removed N = ", n_removed, ")"),
+      x = "Period",
+      y = "Patient ID"
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(
+      axis.text.y = element_text(size = 12),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+}
+
+
+# Use the full data set for all four plots:
+get_counts <- function(treatment, age_group) {
+  summary_counts %>%
+    filter(TrtGroup == treatment, Peds_age == age_group) %>%
+    select(N_original, N_removed) %>%
+    as.list()
+}
+
+bp_adults_counts    <- get_counts("BP", "adults")
+bp_children_counts  <- get_counts("BP", "children")
+control_adults_counts   <- get_counts("Control", "adults")
+control_children_counts <- get_counts("Control", "children")
+
+plot_bp_adults <- plot_missingness_points(plot_data_full, "adults", "BP",
+  n_original = bp_adults_counts$N_original, n_removed = bp_adults_counts$N_removed)
+plot_bp_children <- plot_missingness_points(plot_data_full, "children", "BP",
+  n_original = bp_children_counts$N_original, n_removed = bp_children_counts$N_removed)
+plot_control_adults <- plot_missingness_points(plot_data_full, "adults", "Control",
+  n_original = control_adults_counts$N_original, n_removed = control_adults_counts$N_removed)
+plot_control_children <- plot_missingness_points(plot_data_full, "children", "Control",
+  n_original = control_children_counts$N_original, n_removed = control_children_counts$N_removed)
+
+
+combined_plot <- (plot_bp_adults + plot_bp_children) /
+                 (plot_control_adults + plot_control_children) +
+  plot_layout(widths = c(1, 1), heights = c(2, 1))
+
+combined_plot
+
+#ggsave("./figures/CGM_Missingness_By_Period.png", plot = combined_plot, width = 20, height = 30, dpi = 300)
+
+#ggsave("./figure1/CGM_Missingness_By_Period.png", plot = combined_plot,width = 20, height = 30, dpi = 300)
+```
+
+
+### Marginal Probability - bigger id
+```{r, fig.height=10, fig.width=15}
+library(dplyr)
+library(ggplot2)
+
+# State order: Hypo2 -> Hypo1 -> In range -> Hyper1 -> Hyper2
+states_order_long <- c(
+  "Level 2 hypoglycemia",
+  "Level 1 hypoglycemia",
+  "In range",
+  "Level 1 hyperglycemia",
+  "Level 2 hyperglycemia"
+)
+
+# AGP-style colors (from bottom to top: Very Low, Low, Target, High, Very High)
+agp_colors <- c(
+  "Level 2 hypoglycemia"  = "#B71C1C",  # dark red (Very Low)
+  "Level 1 hypoglycemia"  = "#EF5350",  # lighter red (Low)
+  "In range"              = "#2E7D32",  # green (Target)
+  "Level 1 hyperglycemia" = "#FFCA28",  # yellow (High)
+  "Level 2 hyperglycemia" = "#FB8C00"   # orange (Very High)
+)
+
+# Build data set
+iobp2_f1 <- iobp2 %>%
+  filter(PtID %in% bigger_id) %>%
+  filter(DeviceDtTm < RandDt + weeks(12)) %>%
+  mutate(
+    Rct_period = case_when(
+      DeviceDtTm < RandDt ~ "Baseline",
+      DeviceDtTm >= RandDt & DeviceDtTm < RandDt + weeks(12) ~ "RCT",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Rct_period)) %>%
+  mutate(
+    Level = factor(
+      case_when(
+        Value >= 250 ~ "Level 2 hyperglycemia",
+        Value >= 181 ~ "Level 1 hyperglycemia",
+        Value >= 70  ~ "In range",
+        Value >= 54  ~ "Level 1 hypoglycemia",
+        Value <  54  ~ "Level 2 hypoglycemia"
+      ),
+      levels = states_order_long   # Hypo2 -> Hyper2
+    )
+  )
+
+# Proportions by treatment, period, age, and state
+proportions_by_group <- iobp2_f1 %>%
+  group_by(TrtGroup, Rct_period, Peds_age, Level) %>%
+  tally() %>%
+  group_by(TrtGroup, Rct_period, Peds_age) %>%
+  mutate(
+    Proportion = n / sum(n),
+    TrtGroup   = factor(TrtGroup, levels = c("Control", "BP"))
+  ) %>%
+  ungroup() %>%
+  select(TrtGroup, Rct_period, Peds_age, Level, Proportion)
+
+# Plot
+p_plot <- ggplot(
+  proportions_by_group,
+  aes(x = TrtGroup, y = Proportion, fill = Level)
+) +
+  geom_bar(stat = "identity", position = "dodge", color = "black") +
+  facet_grid(Peds_age ~ Rct_period, scales = "free_x") +
+  labs(
+    title = "Marginal Probabilities of Glycemic States by Treatment, Period, and Age Group",
+    x     = "Treatment group",
+    y     = "Proportion",
+    fill  = "Glycemic State"
+  ) +
+  scale_fill_manual(
+    values = agp_colors,
+    breaks = states_order_long
+  ) +
+  guides(fill = guide_legend(nrow = 1)) +
+  theme_classic(base_size = 24) +
+  geom_text(
+    aes(label = scales::percent(Proportion, accuracy = 0.1)),
+    position = position_dodge(width = 1),
+    vjust    = -0.8,
+    size     = 6
+  ) +
+  theme(
+    axis.text.x     = element_text(),
+    legend.position = "bottom"
+  ) +
+  ylim(0, 0.8)
+
+p_plot
+
+#ggsave("./figure1/Marginal_Probability.png",p_plot, width = 17, height = 10, dpi = 300)
+```
+
+#### Data for rct
+```{r}
+iobp2_f1 <- iobp2 %>%
+  filter(PtID %in% bigger_id) %>%
+  filter(DeviceDtTm < RandDt + weeks(12)) %>%
+  mutate(
+    Rct_period = case_when(
+      DeviceDtTm < RandDt ~ "Baseline",
+      DeviceDtTm >= RandDt & DeviceDtTm < RandDt + weeks(12) ~ "RCT",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Rct_period)) %>%
+  mutate(
+    Level = factor(
+      case_when(
+        Value >= 250 ~ "Level 2 hyperglycemia",
+        Value >= 181 ~ "Level 1 hyperglycemia",
+        Value >= 70  ~ "In range",
+        Value >= 54  ~ "Level 1 hypoglycemia",
+        Value <  54  ~ "Level 2 hypoglycemia"
+      ),
+      levels = states_order_long   # Hypo2 -> Hyper2
+    )
+  )
+
+iobp2_f1_rct_d = rct %>%
+  filter(DeviceDtTm >= RandDt) %>%
+  filter(PtID %in% bigger_id) %>%
+  group_by(PtID) %>%
+  mutate(
+    #Start_time = min(DeviceDtTm),
+    Rct_period = case_when(
+      DeviceDtTm >= RandDt & DeviceDtTm < RandDt + weeks(4) ~ "Weeks 1-4",
+      DeviceDtTm >= RandDt + weeks(4) & DeviceDtTm < RandDt + weeks(8) ~ "Weeks 5-8",
+      DeviceDtTm >= RandDt + weeks(8) & DeviceDtTm < RandDt + weeks(12) ~ "Weeks 9-12",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(Rct_period)) %>% 
+  mutate(
+    Peds_age = if_else(AgeAsofEnrollDt >= 18, "adults", "children")
+  ) %>%
+  dplyr::select(PtID, DeviceDtTm, Value, RandDt, TrtGroup, Peds_age, Rct_period) %>%
+  mutate(Level = factor(case_when(
+    Value >= 250 ~ "Level 2 hyperglycemia",
+    Value >= 181 ~ "Level 1 hyperglycemia",
+    Value >= 70  ~ "In range",
+    Value >= 54  ~ "Level 1 hypoglycemia",
+    Value <  54  ~ "Level 2 hypoglycemia"
+  ), levels = c("Level 2 hypoglycemia", "Level 1 hypoglycemia", "In range",
+                "Level 1 hyperglycemia", "Level 2 hyperglycemia")))
+```
+
+### Only keep the transition between 5 min gap time points, and if this PtID never get into one states, we make this NA, and mention this 
+```{r}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(tibble)
+
+# ------------------------------------------------------------------
+# State order
+# ------------------------------------------------------------------
+states_order_long <- c(
+  "Level 2 hypoglycemia",
+  "Level 1 hypoglycemia",
+  "In range",
+  "Level 1 hyperglycemia",
+  "Level 2 hyperglycemia"
+)
+
+# ------------------------------------------------------------------
+# 1) Transition matrix calculation
+#    - Only transitions within 10 min
+#    - For states never used as "from": row = NA (not forced to sum to 1)
+# ------------------------------------------------------------------
+calculate_transitions2 <- function(data,
+                                   min_gap_mins = 4,   # new: lower bound
+                                   max_gap_mins = 6) { # upper bound as before
+  # sort by time
+  data <- data[order(data$DeviceDtTm), ]
+  n <- nrow(data)
+
+  # need at least 2 rows and at least 2 states
+  if (n < 2 || length(unique(data$Level)) < 2) return(NULL)
+
+  # time difference between consecutive rows (in minutes)
+  data$time_diff <- c(
+    0,
+    as.numeric(difftime(
+      data$DeviceDtTm[-1],
+      data$DeviceDtTm[-n],
+      units = "mins"
+    ))
+  )
+
+  # keep transitions with min_gap_mins < gap <= max_gap_mins
+  valid_idx <- which(
+    data$time_diff[-1] >  min_gap_mins &
+    data$time_diff[-1] <= max_gap_mins
+  ) + 1
+
+  if (length(valid_idx) < 1) return(NULL)
+
+  # use factors with dropped unused levels (no as.character)
+  from_states <- droplevels(data$Level[valid_idx - 1])
+  to_states   <- droplevels(data$Level[valid_idx])
+
+  # counts and row-normalized probabilities
+  trans_table <- table(from_states, to_states)
+  transition_matrix <- prop.table(trans_table, 1)  # rows here sum to 1
+
+  # full matrix:
+  #   - rows for states that ever appear as "from" are 0/positive and sum to 1
+  #   - rows for states never used as "from" stay NA
+  transition_matrix_full <- matrix(
+    NA_real_,
+    length(states_order_long),
+    length(states_order_long),
+    dimnames = list(states_order_long, states_order_long)
+  )
+
+  for (st in rownames(transition_matrix)) {
+    transition_matrix_full[st, ] <- 0
+    transition_matrix_full[st, colnames(transition_matrix)] <-
+      transition_matrix[st, colnames(transition_matrix)]
+  }
+
+  transition_matrix_full
+}
+
+
+
+
+# ------------------------------------------------------------------
+# 2) Per-participant transition matrices
+# ------------------------------------------------------------------
+individual_transitions_td_base_rct2 <- iobp2_f1 %>%
+  group_by(PtID, TrtGroup, Rct_period, Peds_age) %>%
+  do(transitionMatrix = calculate_transitions2(.)) %>%
+  ungroup()
+
+individual_transitions_td_detail_rct2 <- iobp2_f1_rct_d %>%
+  group_by(PtID, TrtGroup, Rct_period, Peds_age) %>%
+  do(transitionMatrix = calculate_transitions2(.)) %>%
+  ungroup()
+
+
+
+# ------------------------------------------------------------------
+# 5) Combine and tidy for plotting
+# ------------------------------------------------------------------
+all_transitions2 <- bind_rows(
+  individual_transitions_td_base_rct2,   # Baseline + RCT
+  individual_transitions_td_detail_rct2  # Weeks 1–4, 5–8, 9–12
+)
+
+
+#saveRDS(all_transitions2, "all_transitions2.rds")
+
+```
+
+
+
+```{r, fig.height=18, fig.width=12}
+# all_transitions2 = readRDS("all_transitions2.rds")
+
+period_levels <- c("Baseline","RCT","Weeks 1-4","Weeks 5-8","Weeks 9-12")
+trt_levels    <- c("Control","BP")
+
+states_order_long <- c(
+  "Level 2 hypoglycemia",
+  "Level 1 hypoglycemia",
+  "In range",
+  "Level 1 hyperglycemia",
+  "Level 2 hyperglycemia"
+)
+
+average_transition_matrix <- function(transitions_tbl) {
+  n_states <- length(states_order_long)
+
+  # Running sum and counts per "from" state
+  sumM <- matrix(
+    0,
+    nrow = n_states,
+    ncol = n_states,
+    dimnames = list(From = states_order_long, To = states_order_long)
+  )
+  count <- setNames(rep(0L, n_states), states_order_long)
+
+  for (M in transitions_tbl$transitionMatrix) {
+    if (is.null(M)) next
+
+    # Align each subject's matrix to the common state order
+    M_aligned <- matrix(
+      NA_real_,
+      nrow = n_states,
+      ncol = n_states,
+      dimnames = list(From = states_order_long, To = states_order_long)
+    )
+    rows <- intersect(rownames(M), states_order_long)
+    cols <- intersect(colnames(M), states_order_long)
+    M_aligned[rows, cols] <- M[rows, cols, drop = FALSE]
+
+    # Loop over each "from" state
+    for (st in states_order_long) {
+      row_vals <- M_aligned[st, ]
+
+      # If entire row is NA, this subject never used st as "from"
+      if (all(is.na(row_vals))) next
+
+      # Ignore any NA cells in this row when summing
+      row_vals[is.na(row_vals)] <- 0
+
+      sumM[st, ] <- sumM[st, ] + row_vals
+      count[st]  <- count[st] + 1L
+    }
+  }
+
+  # Build final averaged matrix
+  out <- matrix(
+    NA_real_,
+    nrow = n_states,
+    ncol = n_states,
+    dimnames = list(From = states_order_long, To = states_order_long)
+  )
+
+  for (st in states_order_long) {
+    if (count[st] > 0L) {
+      out[st, ] <- sumM[st, ] / count[st]
+    }
+    # If count[st] == 0, leave that row as NA
+  }
+
+  out
+}
+
+make_tidy <- function(age_chr) {
+  all_transitions2 %>%
+    # Baseline uses only limited_id; other periods use all PtID
+    dplyr::filter(
+      Peds_age   == age_chr,
+      Rct_period %in% period_levels,
+      TrtGroup   %in% trt_levels,
+      (Rct_period != "Baseline") | (PtID %in% limited_id)
+    ) %>%
+    group_by(Peds_age, Rct_period, TrtGroup) %>%
+    summarise(
+      M = list(average_transition_matrix(cur_data())),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      mat_long = purrr::map(M, ~ {
+        df <- as.data.frame(as.table(.x), stringsAsFactors = FALSE)
+        names(df) <- c("From","To","Prob")
+        df
+      })
+    ) %>%
+    select(-M) %>%
+    unnest(mat_long) %>%
+    mutate(
+      From       = factor(From, levels = states_order_long),
+      To         = factor(To,   levels = states_order_long),
+      Rct_period = factor(Rct_period, levels = period_levels),
+      TrtGroup   = factor(TrtGroup,   levels = trt_levels)
+    )
+}
+
+tm_adults   <- make_tidy("adults")   %>% mutate(Age = factor("Adults",   levels = c("Adults","Children")))
+tm_children <- make_tidy("children") %>% mutate(Age = factor("Children", levels = c("Adults","Children")))
+
+tm_both <- bind_rows(tm_adults, tm_children) %>%
+  mutate(
+    TrtGroup   = factor(TrtGroup,   levels = c("Control","BP")),
+    Rct_period = factor(Rct_period, levels = period_levels),
+    From       = factor(From, levels = states_order_long),
+    To         = factor(To,   levels = states_order_long)
+  )
+
+# ------------------------------------------------------------------
+# Plot: axes order Hypo2 → Hypo1 → In-range → Hyper1 → Hyper2
+# ------------------------------------------------------------------
+reds <- c("#fff5f0", "#fdd0a2", "#fb6a4a", "#cb181d")  # slightly lighter max
+
+short_names <- c(
+  "Level 2 hypoglycemia"  = "L2 Hypo",
+  "Level 1 hypoglycemia"  = "L1 Hypo",
+  "In range"              = "In Range",
+  "Level 1 hyperglycemia" = "L1 Hyper",
+  "Level 2 hyperglycemia" = "L2 Hyper"
+)
+
+p_4x5 <- ggplot(tm_both, aes(x = To, y = From, fill = Prob)) +
+  geom_tile(color = "white") +
+  geom_text(
+    aes(
+      label  = ifelse(is.na(Prob), "", sprintf("%.3f", Prob)),
+      colour = ifelse(is.na(Prob) | Prob <= 0.8, "dark", "light")
+    ),
+    size     = 3
+  ) +
+  scale_colour_manual(
+    values = c("dark" = "black", "light" = "white"),
+    guide  = "none"
+  ) +
+  scale_fill_gradientn(
+    colors   = reds,
+    limits   = c(0, 1),
+    name     = "Probability",
+    na.value = "grey90"
+  ) +
+  scale_x_discrete(labels = short_names) +
+  scale_y_discrete(labels = short_names) +
+  coord_equal() +
+  facet_grid(
+    rows = vars(Rct_period),
+    cols = vars(Age, TrtGroup),
+    drop = FALSE
+  ) +
+  labs(
+    title = "Empirical Transition Probability Matrix by Age, Treatment Group, and Period",
+    x     = "To state",
+    y     = "From state"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid       = element_blank(),
+    axis.text.x      = element_text(angle = 45, hjust = 1),
+    strip.text       = element_text(face = "bold"),
+    strip.placement  = "outside",
+    strip.background = element_blank(),
+    legend.position  = "right"
+  )
+
+p_4x5
+
+ggsave("./figure1/EmpiricalTransitions_4x5.png", p_4x5, width = 12, height = 17, dpi = 300)
+```
+
+### New heatmap for Group Diff
+
+```{r, fig.height=18, fig.width=16}
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(markovchain)
+library(ggplot2)
+library(patchwork)
+library(tools)
+
+# ---------------------------------------------------------------
+# 0. State order and short names
+# ---------------------------------------------------------------
+states_order_long <- c(
+  "Level 2 hyperglycemia",
+  "Level 1 hyperglycemia",
+  "In range",
+  "Level 1 hypoglycemia",
+  "Level 2 hypoglycemia"
+)
+
+short_names <- c(
+  "Level 2 hypoglycemia"   = "L2 Hypo",
+  "Level 1 hypoglycemia"   = "L1 Hypo",
+  "In range"               = "In Range",
+  "Level 1 hyperglycemia"  = "L1 Hyper",
+  "Level 2 hyperglycemia"  = "L2 Hyper"
+)
+
+# ---------------------------------------------------------------
+# 1. Average transition matrix, ignoring NA rows per state
+# ---------------------------------------------------------------
+average_transition_matrix <- function(transitions_tbl) {
+  n_states <- length(states_order_long)
+
+  sumM <- matrix(
+    0,
+    nrow = n_states,
+    ncol = n_states,
+    dimnames = list(From = states_order_long, To = states_order_long)
+  )
+  count <- setNames(integer(n_states), states_order_long)
+
+  for (M in transitions_tbl$transitionMatrix) {
+    if (is.null(M)) next
+
+    # align to common state order
+    M_aligned <- matrix(
+      NA_real_,
+      nrow = n_states,
+      ncol = n_states,
+      dimnames = list(From = states_order_long, To = states_order_long)
+    )
+    rows <- intersect(rownames(M), states_order_long)
+    cols <- intersect(colnames(M), states_order_long)
+    M_aligned[rows, cols] <- M[rows, cols, drop = FALSE]
+
+    for (st in states_order_long) {
+      row_vals <- M_aligned[st, ]
+      if (all(is.na(row_vals))) next   # subject never used this state as "from"
+      row_vals[is.na(row_vals)] <- 0   # ignore NA cells
+
+      sumM[st, ] <- sumM[st, ] + row_vals
+      count[st]  <- count[st] + 1L
+    }
+  }
+
+  out <- matrix(
+    NA_real_,
+    nrow = n_states,
+    ncol = n_states,
+    dimnames = list(From = states_order_long, To = states_order_long)
+  )
+
+  for (st in states_order_long) {
+    if (count[st] > 0L) {
+      out[st, ] <- sumM[st, ] / count[st]
+    }
+  }
+
+  out
+}
+
+# ---------------------------------------------------------------
+# 2. Helpers: extract cell + stationary distribution
+# ---------------------------------------------------------------
+extract_transition_value <- function(mat, from_state, to_state) {
+  if (is.null(mat) ||
+      !(from_state %in% rownames(mat) && to_state %in% colnames(mat))) {
+    return(NA_real_)
+  }
+  mat[from_state, to_state]
+}
+
+# Stationary distribution:
+#   - restrict to states that have any outgoing probability
+#   - compute stationary distribution on that sub-chain
+#   - fill 0 for states never used as "from"
+get_stationary_dist <- function(transition_matrix, states) {
+  n_states <- length(states)
+
+  tm <- transition_matrix
+  if (is.null(tm) || all(is.na(tm))) {
+    return(rep(NA_real_, n_states))
+  }
+
+  # normalize rows (ignoring NA cells)
+  for (i in seq_len(nrow(tm))) {
+    row_vals <- tm[i, ]
+    if (all(is.na(row_vals))) next
+    row_vals[is.na(row_vals)] <- 0
+    rs <- sum(row_vals)
+    if (rs > 0) tm[i, ] <- row_vals / rs
+  }
+
+  row_sums <- rowSums(tm, na.rm = TRUE)
+  used_idx <- which(row_sums > 0)
+
+  if (length(used_idx) == 0) {
+    return(rep(NA_real_, n_states))
+  }
+
+  sub_tm <- tm[used_idx, used_idx, drop = FALSE]
+
+  # ensure rows in sub_tm sum to 1
+  for (i in seq_len(nrow(sub_tm))) {
+    rs <- sum(sub_tm[i, ])
+    if (rs > 0) sub_tm[i, ] <- sub_tm[i, ] / rs
+  }
+
+  mc <- tryCatch(
+    new("markovchain",
+        states = states[used_idx],
+        transitionMatrix = sub_tm,
+        name = "Chain"),
+    error = function(e) NULL
+  )
+  if (is.null(mc)) {
+    return(rep(NA_real_, n_states))
+  }
+
+  stat_used <- tryCatch(
+    as.numeric(steadyStates(mc)[1, ]),
+    error = function(e) rep(NA_real_, length(used_idx))
+  )
+
+  stat <- numeric(n_states)
+  stat[] <- 0
+  stat[used_idx] <- stat_used
+  names(stat) <- states
+  stat
+}
+
+# ---------------------------------------------------------------
+# 3. Bootstrap p-values (simple two-sided sign-based)
+# ---------------------------------------------------------------
+bootstrap_cell_pvals <- function(data, from_state, to_state,
+                                 group1, group2, R = 1000) {
+  diffs <- replicate(R, {
+    sample_g1 <- sample(unique(data$PtID[data$TrtGroup == group1]), replace = TRUE)
+    sample_g2 <- sample(unique(data$PtID[data$TrtGroup == group2]), replace = TRUE)
+
+    mats_g1 <- data %>%
+      filter(TrtGroup == group1, PtID %in% sample_g1) %>%
+      pull(transitionMatrix)
+    mats_g2 <- data %>%
+      filter(TrtGroup == group2, PtID %in% sample_g2) %>%
+      pull(transitionMatrix)
+
+    val_g1 <- mean(
+      map_dbl(mats_g1, ~extract_transition_value(.x, from_state, to_state)),
+      na.rm = TRUE
+    )
+    val_g2 <- mean(
+      map_dbl(mats_g2, ~extract_transition_value(.x, from_state, to_state)),
+      na.rm = TRUE
+    )
+    val_g1 - val_g2
+  })
+
+  diffs <- diffs[!is.na(diffs)]
+  if (!length(diffs)) return(NA_real_)
+
+  # two-sided p-value based on sign
+  2 * min(mean(diffs >= 0, na.rm = TRUE),
+          mean(diffs <= 0, na.rm = TRUE))
+}
+
+# ---------------------------------------------------------------
+# 4. Global colour limits
+# ---------------------------------------------------------------
+get_group_diff_vals <- function(data, age, periods,
+                                group1 = "BP", group2 = "Control") {
+  all_diffs <- c()
+  for (period in periods) {
+    subdata <- data %>% filter(Peds_age == age, Rct_period == period)
+    mats_bp   <- subdata %>% filter(TrtGroup == group1) %>% pull(transitionMatrix)
+    mats_ctrl <- subdata %>% filter(TrtGroup == group2) %>% pull(transitionMatrix)
+    tm_bp   <- average_transition_matrix(tibble(transitionMatrix = mats_bp))
+    tm_ctrl <- average_transition_matrix(tibble(transitionMatrix = mats_ctrl))
+    diff_matrix <- tm_bp - tm_ctrl
+    all_diffs   <- c(all_diffs, as.vector(diff_matrix))
+  }
+  max(abs(all_diffs), na.rm = TRUE) %>% round(2) + 0.01
+}
+
+# ---------------------------------------------------------------
+# 5. Plotting function with effect-size filter on stars
+# ---------------------------------------------------------------
+create_enhanced_heatmap <- function(data, age, period,
+                                    group1 = "BP", group2 = "Control",
+                                    R = 1000, global_limit,
+                                    min_effect = 0.001) { 
+  subdata <- data %>% filter(Peds_age == age, Rct_period == period)
+  mats_bp   <- subdata %>% filter(TrtGroup == group1) %>% pull(transitionMatrix)
+  mats_ctrl <- subdata %>% filter(TrtGroup == group2) %>% pull(transitionMatrix)
+
+  tm_bp   <- average_transition_matrix(tibble(transitionMatrix = mats_bp))
+  tm_ctrl <- average_transition_matrix(tibble(transitionMatrix = mats_ctrl))
+
+  marginal_bp   <- get_stationary_dist(tm_bp,   states_order_long)
+  marginal_ctrl <- get_stationary_dist(tm_ctrl, states_order_long)
+
+  diff_matrix <- tm_bp - tm_ctrl
+  diff_df <- as.data.frame(as.table(diff_matrix))
+  colnames(diff_df) <- c("From", "To", "Diff")
+
+  # x: Hypo2 -> Hyper2 (left→right), y: Hypo2 -> Hyper2 (bottom→top)
+  diff_df$To   <- factor(diff_df$To,   levels = rev(states_order_long))
+  diff_df$From <- factor(diff_df$From, levels = rev(states_order_long))
+
+  diff_df$Pval <- purrr::pmap_dbl(
+    diff_df[, c("From", "To")],
+    function(From, To)
+      tryCatch(
+        bootstrap_cell_pvals(
+          subdata,
+          as.character(From),
+          as.character(To),
+          group1,
+          group2,
+          R = R
+        ),
+        error = function(e) NA_real_
+      )
+  )
+
+  # stars from p-value only
+  Star_raw <- cut(
+    diff_df$Pval,
+    breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+    labels = c("***", "**", "*", ""),
+    right  = TRUE
+  )
+
+  # effect-size filter: suppress stars if |Diff| < min_effect
+  diff_df$Star <- ifelse(
+    abs(diff_df$Diff) < min_effect | is.na(Star_raw),
+    "",
+    as.character(Star_raw)
+  )
+
+  fmt_pct <- function(x) ifelse(is.na(x), "NA", sprintf("%.1f%%", 100 * x))
+
+  states_plot    <- levels(diff_df$From)
+  marg_ctrl_plot <- marginal_ctrl[states_plot]
+  marg_bp_plot   <- marginal_bp[states_plot]
+
+  y_labels <- sprintf(
+    "%s (%s, %s)",
+    states_plot,
+    fmt_pct(marg_ctrl_plot),
+    fmt_pct(marg_bp_plot)
+  )
+  names(y_labels) <- states_plot
+
+  ggplot(diff_df, aes(x = To, y = From, fill = Diff)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = Star), color = "black", size = 6) +
+    scale_fill_gradient2(
+      low      = "blue",
+      mid      = "white",
+      high     = "red",
+      midpoint = 0,
+      limits   = c(-global_limit, global_limit),
+      name     = "Diff (BP - Control)"
+    ) +
+    scale_y_discrete(labels = y_labels) +
+    scale_x_discrete(labels = short_names[levels(diff_df$To)]) +
+    labs(
+      title = paste0("Age: ", toTitleCase(age), " | Period: ", period),
+      x = "To State",
+      y = "From State (Control %, BP %)"
+    ) +
+    theme_minimal(base_size = 15) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      plot.title  = element_text(size = 14, face = "bold", hjust = 0.5),
+      axis.text.y = element_text(size = 12)
+    )
+}
+
+# ---------------------------------------------------------------
+# 6. Main loop: compute limits and draw all panels
+# ---------------------------------------------------------------
+age_groups <- c("adults", "children")
+periods    <- c("Baseline", "RCT", "Weeks 1-4", "Weeks 5-8", "Weeks 9-12")
+
+#all_transitions2_updated <- readRDS("all_transitions22.rds")
+
+global_limits <- list()
+for (age in age_groups) {
+  global_limits[[age]] <- get_group_diff_vals(
+    all_transitions2,
+    age,
+    periods,
+    "BP",
+    "Control"
+  )
+}
+
+plot_list <- list()
+for (age in age_groups) {
+  for (period in periods) {
+    plot_list[[paste(age, period, sep = "_")]] <-
+      create_enhanced_heatmap(
+        all_transitions2,
+        age         = age,
+        period      = period,
+        group1      = "BP",
+        group2      = "Control",
+        R           = 1000,                       # for speed; increase to 1000 for paper
+        global_limit = global_limits[[age]]                 # threshold for showing stars
+      )
+  }
+}
+
+final_plot <- wrap_plots(plot_list, ncol = 2, byrow = FALSE) +
+  plot_annotation(
+    title    = "Differences in Transition Probabilities (BP - Control) with Significance",
+    subtitle = "Separate color scales for Adults and Children"
+  )
+
+final_plot
+
+#ggsave("./figure1/transition_probability_diff_heatmaps_significance.png", final_plot, width = 16, height = 18, dpi = 300)
+```
+
+```{r baseline limited id, fig.height=18, fig.width=16}
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(markovchain)
+library(ggplot2)
+library(patchwork)
+library(tools)
+
+# ---------------------------------------------------------------
+# 0. State order and short names
+# ---------------------------------------------------------------
+states_order_long <- c(
+  "Level 2 hyperglycemia",
+  "Level 1 hyperglycemia",
+  "In range",
+  "Level 1 hypoglycemia",
+  "Level 2 hypoglycemia"
+)
+
+short_names <- c(
+  "Level 2 hypoglycemia"   = "L2 Hypo",
+  "Level 1 hypoglycemia"   = "L1 Hypo",
+  "In range"               = "In Range",
+  "Level 1 hyperglycemia"  = "L1 Hyper",
+  "Level 2 hyperglycemia"  = "L2 Hyper"
+)
+
+# ---------------------------------------------------------------
+# 1. Average transition matrix, ignoring NA rows per state
+# ---------------------------------------------------------------
+average_transition_matrix <- function(transitions_tbl) {
+  n_states <- length(states_order_long)
+
+  sumM <- matrix(
+    0,
+    nrow = n_states,
+    ncol = n_states,
+    dimnames = list(From = states_order_long, To = states_order_long)
+  )
+  count <- setNames(integer(n_states), states_order_long)
+
+  for (M in transitions_tbl$transitionMatrix) {
+    if (is.null(M)) next
+
+    M_aligned <- matrix(
+      NA_real_,
+      nrow = n_states,
+      ncol = n_states,
+      dimnames = list(From = states_order_long, To = states_order_long)
+    )
+    rows <- intersect(rownames(M), states_order_long)
+    cols <- intersect(colnames(M), states_order_long)
+    M_aligned[rows, cols] <- M[rows, cols, drop = FALSE]
+
+    for (st in states_order_long) {
+      row_vals <- M_aligned[st, ]
+      if (all(is.na(row_vals))) next
+      row_vals[is.na(row_vals)] <- 0
+
+      sumM[st, ] <- sumM[st, ] + row_vals
+      count[st]  <- count[st] + 1L
+    }
+  }
+
+  out <- matrix(
+    NA_real_,
+    nrow = n_states,
+    ncol = n_states,
+    dimnames = list(From = states_order_long, To = states_order_long)
+  )
+
+  for (st in states_order_long) {
+    if (count[st] > 0L) {
+      out[st, ] <- sumM[st, ] / count[st]
+    }
+  }
+
+  out
+}
+
+# ---------------------------------------------------------------
+# 2. Helpers: extract cell + stationary distribution
+# ---------------------------------------------------------------
+extract_transition_value <- function(mat, from_state, to_state) {
+  if (is.null(mat) ||
+      !(from_state %in% rownames(mat) && to_state %in% colnames(mat))) {
+    return(NA_real_)
+  }
+  mat[from_state, to_state]
+}
+
+get_stationary_dist <- function(transition_matrix, states) {
+  n_states <- length(states)
+
+  tm <- transition_matrix
+  if (is.null(tm) || all(is.na(tm))) {
+    return(rep(NA_real_, n_states))
+  }
+
+  for (i in seq_len(nrow(tm))) {
+    row_vals <- tm[i, ]
+    if (all(is.na(row_vals))) next
+    row_vals[is.na(row_vals)] <- 0
+    rs <- sum(row_vals)
+    if (rs > 0) tm[i, ] <- row_vals / rs
+  }
+
+  row_sums <- rowSums(tm, na.rm = TRUE)
+  used_idx <- which(row_sums > 0)
+
+  if (length(used_idx) == 0) {
+    return(rep(NA_real_, n_states))
+  }
+
+  sub_tm <- tm[used_idx, used_idx, drop = FALSE]
+  for (i in seq_len(nrow(sub_tm))) {
+    rs <- sum(sub_tm[i, ])
+    if (rs > 0) sub_tm[i, ] <- sub_tm[i, ] / rs
+  }
+
+  mc <- tryCatch(
+    new("markovchain",
+        states = states[used_idx],
+        transitionMatrix = sub_tm,
+        name = "Chain"),
+    error = function(e) NULL
+  )
+  if (is.null(mc)) {
+    return(rep(NA_real_, n_states))
+  }
+
+  stat_used <- tryCatch(
+    as.numeric(steadyStates(mc)[1, ]),
+    error = function(e) rep(NA_real_, length(used_idx))
+  )
+
+  stat <- numeric(n_states)
+  stat[] <- 0
+  stat[used_idx] <- stat_used
+  names(stat) <- states
+  stat
+}
+
+# ---------------------------------------------------------------
+# 3. Bootstrap p-values for one cell (BP vs Control)
+# ---------------------------------------------------------------
+bootstrap_cell_pvals <- function(data, from_state, to_state,
+                                 group1, group2, R = 1000) {
+  diffs <- replicate(R, {
+    sample_g1 <- sample(unique(data$PtID[data$TrtGroup == group1]), replace = TRUE)
+    sample_g2 <- sample(unique(data$PtID[data$TrtGroup == group2]), replace = TRUE)
+
+    mats_g1 <- data %>%
+      filter(TrtGroup == group1, PtID %in% sample_g1) %>%
+      pull(transitionMatrix)
+    mats_g2 <- data %>%
+      filter(TrtGroup == group2, PtID %in% sample_g2) %>%
+      pull(transitionMatrix)
+
+    val_g1 <- mean(
+      map_dbl(mats_g1, ~extract_transition_value(.x, from_state, to_state)),
+      na.rm = TRUE
+    )
+    val_g2 <- mean(
+      map_dbl(mats_g2, ~extract_transition_value(.x, from_state, to_state)),
+      na.rm = TRUE
+    )
+    val_g1 - val_g2
+  })
+
+  diffs <- diffs[!is.na(diffs)]
+  if (!length(diffs)) return(NA_real_)
+
+  2 * min(mean(diffs >= 0, na.rm = TRUE),
+          mean(diffs <= 0, na.rm = TRUE))
+}
+
+# ---------------------------------------------------------------
+# 4. Global colour limits (per age); Baseline uses limited_id
+# ---------------------------------------------------------------
+get_group_diff_vals <- function(data, age, periods,
+                                group1 = "BP", group2 = "Control") {
+  all_diffs <- c()
+  for (period in periods) {
+    subdata <- data %>%
+      filter(Peds_age == age,
+             Rct_period == period) %>%
+      { if (period == "Baseline") filter(., PtID %in% limited_id) else . }
+
+    mats_bp   <- subdata %>% filter(TrtGroup == group1) %>% pull(transitionMatrix)
+    mats_ctrl <- subdata %>% filter(TrtGroup == group2) %>% pull(transitionMatrix)
+    tm_bp   <- average_transition_matrix(tibble(transitionMatrix = mats_bp))
+    tm_ctrl <- average_transition_matrix(tibble(transitionMatrix = mats_ctrl))
+    diff_matrix <- tm_bp - tm_ctrl
+    all_diffs   <- c(all_diffs, as.vector(diff_matrix))
+  }
+  max(abs(all_diffs), na.rm = TRUE) %>% round(2) + 0.01
+}
+
+# ---------------------------------------------------------------
+# 5. Plotting function with Bonferroni-adjusted p-values
+#    Baseline again restricted to limited_id
+# ---------------------------------------------------------------
+create_enhanced_heatmap <- function(data, age, period,
+                                    group1 = "BP", group2 = "Control",
+                                    R = 1000, global_limit,
+                                    min_effect = 0.001) {
+
+  subdata <- data %>%
+    filter(Peds_age == age,
+           Rct_period == period) %>%
+    { if (period == "Baseline") filter(., PtID %in% limited_id) else . }
+
+  mats_bp   <- subdata %>% filter(TrtGroup == group1) %>% pull(transitionMatrix)
+  mats_ctrl <- subdata %>% filter(TrtGroup == group2) %>% pull(transitionMatrix)
+
+  tm_bp   <- average_transition_matrix(tibble(transitionMatrix = mats_bp))
+  tm_ctrl <- average_transition_matrix(tibble(transitionMatrix = mats_ctrl))
+
+  marginal_bp   <- get_stationary_dist(tm_bp,   states_order_long)
+  marginal_ctrl <- get_stationary_dist(tm_ctrl, states_order_long)
+
+  diff_matrix <- tm_bp - tm_ctrl
+  diff_df <- as.data.frame(as.table(diff_matrix))
+  colnames(diff_df) <- c("From", "To", "Diff")
+
+  diff_df$To   <- factor(diff_df$To,   levels = rev(states_order_long))
+  diff_df$From <- factor(diff_df$From, levels = rev(states_order_long))
+
+  diff_df$Pval <- purrr::pmap_dbl(
+    diff_df[, c("From", "To")],
+    function(From, To)
+      tryCatch(
+        bootstrap_cell_pvals(
+          subdata,
+          as.character(From),
+          as.character(To),
+          group1,
+          group2,
+          R = R
+        ),
+        error = function(e) NA_real_
+      )
+  )
+
+  diff_df$Pval_adj <- p.adjust(diff_df$Pval, method = "bonferroni")
+
+  Star_raw <- cut(
+    diff_df$Pval_adj,
+    breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+    labels = c("***", "**", "*", ""),
+    right  = TRUE
+  )
+
+  diff_df$Star <- ifelse(
+    abs(diff_df$Diff) < min_effect | is.na(Star_raw),
+    "",
+    as.character(Star_raw)
+  )
+
+  fmt_pct <- function(x) ifelse(is.na(x), "NA", sprintf("%.1f%%", 100 * x))
+
+  states_plot    <- levels(diff_df$From)
+  marg_ctrl_plot <- marginal_ctrl[states_plot]
+  marg_bp_plot   <- marginal_bp[states_plot]
+
+  y_labels <- sprintf(
+    "%s (%s, %s)",
+    states_plot,
+    fmt_pct(marg_ctrl_plot),
+    fmt_pct(marg_bp_plot)
+  )
+  names(y_labels) <- states_plot
+
+  n_bp   <- subdata %>% filter(TrtGroup == group1) %>%
+    summarise(n = n_distinct(PtID)) %>% pull(n)
+  n_ctrl <- subdata %>% filter(TrtGroup == group2) %>%
+    summarise(n = n_distinct(PtID)) %>% pull(n)
+
+  ggplot(diff_df, aes(x = To, y = From, fill = Diff)) +
+    geom_tile(color = "white") +
+    geom_text(
+      aes(label = Star),
+      color = "black",
+      size = 6,
+      fontface = "bold",
+      na.rm = TRUE
+    ) +
+    scale_fill_gradient2(
+      low      = "blue",
+      mid      = "white",
+      high     = "red",
+      midpoint = 0,
+      limits   = c(-global_limit, global_limit),
+      name     = "Diff (BP - Control)"
+    ) +
+    scale_y_discrete(labels = y_labels) +
+    scale_x_discrete(labels = short_names[levels(diff_df$To)]) +
+    labs(
+      title = paste0(
+        "Age: ", toTitleCase(age),
+        " | Period: ", period,
+        " (BP n=", n_bp, ", Control n=", n_ctrl, ")"
+      ),
+      x = "To State",
+      y = "From State (Control %, BP %)"
+    ) +
+    theme_minimal(base_size = 15) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      plot.title  = element_text(size = 14, face = "bold", hjust = 0.5),
+      axis.text.y = element_text(size = 12)
+    )
+}
+
+# ---------------------------------------------------------------
+# 6. Main loop
+# ---------------------------------------------------------------
+age_groups <- c("adults", "children")
+periods    <- c("Baseline", "RCT", "Weeks 1-4", "Weeks 5-8", "Weeks 9-12")
+
+global_limits <- list()
+for (age in age_groups) {
+  global_limits[[age]] <- get_group_diff_vals(
+    all_transitions2,
+    age,
+    periods,
+    "BP",
+    "Control"
+  )
+}
+
+plot_list <- list()
+for (age in age_groups) {
+  for (period in periods) {
+    plot_list[[paste(age, period, sep = "_")]] <-
+      create_enhanced_heatmap(
+        all_transitions2,
+        age         = age,
+        period      = period,
+        group1      = "BP",
+        group2      = "Control",
+        R           = 1000,
+        global_limit = global_limits[[age]]
+      )
+  }
+}
+
+final_plot <- wrap_plots(plot_list, ncol = 2, byrow = FALSE) +
+  plot_annotation(
+    title    = "Differences in Transition Probabilities (BP - Control) with Bonferroni-Adjusted Significance",
+    subtitle = "Baseline uses limited-id subset; separate colour scales for Adults and Children"
+  )
+
+final_plot
+ggsave("./figure1/transition_probability_diff_heatmaps_significance.png",        final_plot, width = 16, height = 18, dpi = 300)
+
+
+```
+
+```{r baseline limited id, fig.height=18, fig.width=16}
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(markovchain)
+library(ggplot2)
+library(patchwork)
+library(tools)
+
+# ---------------------------------------------------------------
+# 0. State order and short names
+# ---------------------------------------------------------------
+states_order_long <- c(
+  "Level 2 hyperglycemia",
+  "Level 1 hyperglycemia",
+  "In range",
+  "Level 1 hypoglycemia",
+  "Level 2 hypoglycemia"
+)
+
+short_names <- c(
+  "Level 2 hypoglycemia"   = "L2 Hypo",
+  "Level 1 hypoglycemia"   = "L1 Hypo",
+  "In range"               = "In Range",
+  "Level 1 hyperglycemia"  = "L1 Hyper",
+  "Level 2 hyperglycemia"  = "L2 Hyper"
+)
+
+# ---------------------------------------------------------------
+# 1. Average transition matrix, ignoring NA rows per state
+# ---------------------------------------------------------------
+average_transition_matrix <- function(transitions_tbl) {
+  n_states <- length(states_order_long)
+
+  sumM <- matrix(
+    0,
+    nrow = n_states,
+    ncol = n_states,
+    dimnames = list(From = states_order_long, To = states_order_long)
+  )
+  count <- setNames(integer(n_states), states_order_long)
+
+  for (M in transitions_tbl$transitionMatrix) {
+    if (is.null(M)) next
+
+    M_aligned <- matrix(
+      NA_real_,
+      nrow = n_states,
+      ncol = n_states,
+      dimnames = list(From = states_order_long, To = states_order_long)
+    )
+    rows <- intersect(rownames(M), states_order_long)
+    cols <- intersect(colnames(M), states_order_long)
+    M_aligned[rows, cols] <- M[rows, cols, drop = FALSE]
+
+    for (st in states_order_long) {
+      row_vals <- M_aligned[st, ]
+      if (all(is.na(row_vals))) next
+      row_vals[is.na(row_vals)] <- 0
+
+      sumM[st, ] <- sumM[st, ] + row_vals
+      count[st]  <- count[st] + 1L
+    }
+  }
+
+  out <- matrix(
+    NA_real_,
+    nrow = n_states,
+    ncol = n_states,
+    dimnames = list(From = states_order_long, To = states_order_long)
+  )
+
+  for (st in states_order_long) {
+    if (count[st] > 0L) {
+      out[st, ] <- sumM[st, ] / count[st]
+    }
+  }
+
+  out
+}
+
+# ---------------------------------------------------------------
+# 2. Helpers: extract cell + stationary distribution
+# ---------------------------------------------------------------
+extract_transition_value <- function(mat, from_state, to_state) {
+  if (is.null(mat) ||
+      !(from_state %in% rownames(mat) && to_state %in% colnames(mat))) {
+    return(NA_real_)
+  }
+  mat[from_state, to_state]
+}
+
+get_stationary_dist <- function(transition_matrix, states) {
+  n_states <- length(states)
+
+  tm <- transition_matrix
+  if (is.null(tm) || all(is.na(tm))) {
+    return(rep(NA_real_, n_states))
+  }
+
+  for (i in seq_len(nrow(tm))) {
+    row_vals <- tm[i, ]
+    if (all(is.na(row_vals))) next
+    row_vals[is.na(row_vals)] <- 0
+    rs <- sum(row_vals)
+    if (rs > 0) tm[i, ] <- row_vals / rs
+  }
+
+  row_sums <- rowSums(tm, na.rm = TRUE)
+  used_idx <- which(row_sums > 0)
+
+  if (length(used_idx) == 0) {
+    return(rep(NA_real_, n_states))
+  }
+
+  sub_tm <- tm[used_idx, used_idx, drop = FALSE]
+  for (i in seq_len(nrow(sub_tm))) {
+    rs <- sum(sub_tm[i, ])
+    if (rs > 0) sub_tm[i, ] <- sub_tm[i, ] / rs
+  }
+
+  mc <- tryCatch(
+    new("markovchain",
+        states = states[used_idx],
+        transitionMatrix = sub_tm,
+        name = "Chain"),
+    error = function(e) NULL
+  )
+  if (is.null(mc)) {
+    return(rep(NA_real_, n_states))
+  }
+
+  stat_used <- tryCatch(
+    as.numeric(steadyStates(mc)[1, ]),
+    error = function(e) rep(NA_real_, length(used_idx))
+  )
+
+  stat <- numeric(n_states)
+  stat[] <- 0
+  stat[used_idx] <- stat_used
+  names(stat) <- states
+  stat
+}
+
+# ---------------------------------------------------------------
+# 3. Bootstrap stats for one cell (BP vs Control):
+#    returns p-value and 95% CI for the group difference
+# ---------------------------------------------------------------
+bootstrap_cell_stats <- function(data, from_state, to_state,
+                                 group1, group2, R = 1000) {
+  diffs <- replicate(R, {
+    sample_g1 <- sample(unique(data$PtID[data$TrtGroup == group1]), replace = TRUE)
+    sample_g2 <- sample(unique(data$PtID[data$TrtGroup == group2]), replace = TRUE)
+
+    mats_g1 <- data %>%
+      filter(TrtGroup == group1, PtID %in% sample_g1) %>%
+      pull(transitionMatrix)
+    mats_g2 <- data %>%
+      filter(TrtGroup == group2, PtID %in% sample_g2) %>%
+      pull(transitionMatrix)
+
+    val_g1 <- mean(
+      map_dbl(mats_g1, ~ extract_transition_value(.x, from_state, to_state)),
+      na.rm = TRUE
+    )
+    val_g2 <- mean(
+      map_dbl(mats_g2, ~ extract_transition_value(.x, from_state, to_state)),
+      na.rm = TRUE
+    )
+    val_g1 - val_g2
+  })
+
+  diffs <- diffs[!is.na(diffs)]
+  if (!length(diffs)) {
+    return(list(
+      pval   = NA_real_,
+      ci_low = NA_real_,
+      ci_hi  = NA_real_
+    ))
+  }
+
+  pval <- 2 * min(
+    mean(diffs >= 0, na.rm = TRUE),
+    mean(diffs <= 0, na.rm = TRUE)
+  )
+  ci <- stats::quantile(diffs, probs = c(0.025, 0.975), na.rm = TRUE)
+
+  list(
+    pval   = as.numeric(pval),
+    ci_low = as.numeric(ci[1]),
+    ci_hi  = as.numeric(ci[2])
+  )
+}
+
+# ---------------------------------------------------------------
+# 4. Global colour limits (per age); Baseline uses limited_id
+# ---------------------------------------------------------------
+get_group_diff_vals <- function(data, age, periods,
+                                group1 = "BP", group2 = "Control") {
+  all_diffs <- c()
+  for (period in periods) {
+    subdata <- data %>%
+      filter(Peds_age == age,
+             Rct_period == period) %>%
+      { if (period == "Baseline") filter(., PtID %in% limited_id) else . }
+
+    mats_bp   <- subdata %>% filter(TrtGroup == group1) %>% pull(transitionMatrix)
+    mats_ctrl <- subdata %>% filter(TrtGroup == group2) %>% pull(transitionMatrix)
+    tm_bp   <- average_transition_matrix(tibble(transitionMatrix = mats_bp))
+    tm_ctrl <- average_transition_matrix(tibble(transitionMatrix = mats_ctrl))
+    diff_matrix <- tm_bp - tm_ctrl
+    all_diffs   <- c(all_diffs, as.vector(diff_matrix))
+  }
+  max(abs(all_diffs), na.rm = TRUE) %>% round(2) + 0.01
+}
+
+# ---------------------------------------------------------------
+# 5. Plotting function with bootstrap 95% CI labels
+#    Baseline again restricted to limited_id
+# ---------------------------------------------------------------
+create_enhanced_heatmap <- function(data, age, period,
+                                    group1 = "BP", group2 = "Control",
+                                    R = 1000, global_limit,
+                                    min_effect = 0.001) {
+
+  subdata <- data %>%
+    filter(Peds_age == age,
+           Rct_period == period) %>%
+    { if (period == "Baseline") filter(., PtID %in% limited_id) else . }
+
+  mats_bp   <- subdata %>% filter(TrtGroup == group1) %>% pull(transitionMatrix)
+  mats_ctrl <- subdata %>% filter(TrtGroup == group2) %>% pull(transitionMatrix)
+
+  tm_bp   <- average_transition_matrix(tibble(transitionMatrix = mats_bp))
+  tm_ctrl <- average_transition_matrix(tibble(transitionMatrix = mats_ctrl))
+
+  marginal_bp   <- get_stationary_dist(tm_bp,   states_order_long)
+  marginal_ctrl <- get_stationary_dist(tm_ctrl, states_order_long)
+
+  diff_matrix <- tm_bp - tm_ctrl
+  diff_df <- as.data.frame(as.table(diff_matrix))
+  colnames(diff_df) <- c("From", "To", "Diff")
+
+  diff_df$To   <- factor(diff_df$To,   levels = rev(states_order_long))
+  diff_df$From <- factor(diff_df$From, levels = rev(states_order_long))
+
+  # bootstrap stats (p-value + CI) per cell
+  cell_stats <- purrr::pmap(
+    diff_df[, c("From", "To")],
+    function(From, To) {
+      bootstrap_cell_stats(
+        data   = subdata,
+        from_state = as.character(From),
+        to_state   = as.character(To),
+        group1     = group1,
+        group2     = group2,
+        R          = R
+      )
+    }
+  )
+
+  diff_df$Pval   <- map_dbl(cell_stats, "pval")
+  diff_df$CI_low <- map_dbl(cell_stats, "ci_low")
+  diff_df$CI_hi  <- map_dbl(cell_stats, "ci_hi")
+
+  # Bonferroni-adjusted p-values (not shown, but kept if needed downstream)
+  diff_df$Pval_adj <- p.adjust(diff_df$Pval, method = "bonferroni")
+
+  fmt_pct <- function(x) ifelse(is.na(x), "NA", sprintf("%.1f%%", 100 * x))
+
+  states_plot    <- levels(diff_df$From)
+  marg_ctrl_plot <- marginal_ctrl[states_plot]
+  marg_bp_plot   <- marginal_bp[states_plot]
+
+  y_labels <- sprintf(
+    "%s (%s, %s)",
+    states_plot,
+    fmt_pct(marg_ctrl_plot),
+    fmt_pct(marg_bp_plot)
+  )
+  names(y_labels) <- states_plot
+
+  n_bp <- subdata %>%
+    filter(TrtGroup == group1) %>%
+    summarise(n = n_distinct(PtID)) %>%
+    pull(n)
+  n_ctrl <- subdata %>%
+    filter(TrtGroup == group2) %>%
+    summarise(n = n_distinct(PtID)) %>%
+    pull(n)
+
+  # label: Diff and CI (three decimals), blank if any NA or tiny effect
+  diff_df <- diff_df %>%
+    mutate(
+      label_ci = dplyr::if_else(
+        is.na(Diff) | is.na(CI_low) | is.na(CI_hi) | abs(Diff) < min_effect,
+        "",
+        sprintf("%.3f\n[%.3f, %.3f]", Diff, CI_low, CI_hi)
+      )
+    )
+
+  ggplot(diff_df, aes(x = To, y = From, fill = Diff)) +
+    geom_tile(color = "white") +
+    geom_text(
+      aes(label = label_ci),
+      color    = "black",
+      size     = 3.1,
+      lineheight = 0.9,
+      na.rm   = TRUE
+    ) +
+    scale_fill_gradient2(
+      low      = "blue",
+      mid      = "white",
+      high     = "red",
+      midpoint = 0,
+      limits   = c(-global_limit, global_limit),
+      name     = "Diff (BP - Control)"
+    ) +
+    scale_y_discrete(labels = y_labels) +
+    scale_x_discrete(labels = short_names[levels(diff_df$To)]) +
+    labs(
+      title = paste0(
+        "Age: ", toTitleCase(age),
+        " | Period: ", period,
+        " (BP n=", n_bp, ", Control n=", n_ctrl, ")"
+      ),
+      x = "To State",
+      y = "From State (Control %, BP %)"
+    ) +
+    theme_minimal(base_size = 15) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      plot.title  = element_text(size = 14, face = "bold", hjust = 0.5),
+      axis.text.y = element_text(size = 12)
+    )
+}
+
+# ---------------------------------------------------------------
+# 6. Main loop
+# ---------------------------------------------------------------
+age_groups <- c("adults", "children")
+periods    <- c("Baseline", "RCT", "Weeks 1-4", "Weeks 5-8", "Weeks 9-12")
+
+global_limits <- list()
+for (age in age_groups) {
+  global_limits[[age]] <- get_group_diff_vals(
+    all_transitions2,
+    age,
+    periods,
+    "BP",
+    "Control"
+  )
+}
+
+plot_list <- list()
+for (age in age_groups) {
+  for (period in periods) {
+    plot_list[[paste(age, period, sep = "_")]] <-
+      create_enhanced_heatmap(
+        all_transitions2,
+        age         = age,
+        period      = period,
+        group1      = "BP",
+        group2      = "Control",
+        R           = 1000,
+        global_limit = global_limits[[age]]
+      )
+  }
+}
+
+final_plot <- wrap_plots(plot_list, ncol = 2, byrow = FALSE) +
+  plot_annotation(
+    title    = "Differences in Transition Probabilities (BP - Control) with Bootstrap 95% CIs",
+    subtitle = "Baseline uses limited-id subset; separate colour scales for Adults and Children. Labels show diff and 95% CI."
+  )
+
+final_plot
+
+ggsave(
+  "./figure1/transition_probability_diff_heatmaps_CI.png",
+  final_plot,
+  width  = 24,
+  height = 26,
+  dpi    = 300
+)
+```
+### supplemnt- limited-id for group-level
+```{r, fig.height=18, fig.width=16}
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(markovchain)
+library(ggplot2)
+library(patchwork)
+library(tools)
+
+# ---------------------------------------------------------------
+# 0. State order and short names
+# ---------------------------------------------------------------
+states_order_long <- c(
+  "Level 2 hyperglycemia",
+  "Level 1 hyperglycemia",
+  "In range",
+  "Level 1 hypoglycemia",
+  "Level 2 hypoglycemia"
+)
+
+short_names <- c(
+  "Level 2 hypoglycemia"   = "L2 Hypo",
+  "Level 1 hypoglycemia"   = "L1 Hypo",
+  "In range"               = "In Range",
+  "Level 1 hyperglycemia"  = "L1 Hyper",
+  "Level 2 hyperglycemia"  = "L2 Hyper"
+)
+
+# ---------------------------------------------------------------
+# 1. Average transition matrix, ignoring NA rows per state
+# ---------------------------------------------------------------
+average_transition_matrix <- function(transitions_tbl) {
+  n_states <- length(states_order_long)
+
+  sumM <- matrix(
+    0,
+    nrow = n_states,
+    ncol = n_states,
+    dimnames = list(From = states_order_long, To = states_order_long)
+  )
+  count <- setNames(integer(n_states), states_order_long)
+
+  for (M in transitions_tbl$transitionMatrix) {
+    if (is.null(M)) next
+
+    M_aligned <- matrix(
+      NA_real_,
+      nrow = n_states,
+      ncol = n_states,
+      dimnames = list(From = states_order_long, To = states_order_long)
+    )
+    rows <- intersect(rownames(M), states_order_long)
+    cols <- intersect(colnames(M), states_order_long)
+    M_aligned[rows, cols] <- M[rows, cols, drop = FALSE]
+
+    for (st in states_order_long) {
+      row_vals <- M_aligned[st, ]
+      if (all(is.na(row_vals))) next
+      row_vals[is.na(row_vals)] <- 0
+
+      sumM[st, ] <- sumM[st, ] + row_vals
+      count[st]  <- count[st] + 1L
+    }
+  }
+
+  out <- matrix(
+    NA_real_,
+    nrow = n_states,
+    ncol = n_states,
+    dimnames = list(From = states_order_long, To = states_order_long)
+  )
+
+  for (st in states_order_long) {
+    if (count[st] > 0L) {
+      out[st, ] <- sumM[st, ] / count[st]
+    }
+  }
+
+  out
+}
+
+# ---------------------------------------------------------------
+# 2. Helpers: extract cell + stationary distribution
+# ---------------------------------------------------------------
+extract_transition_value <- function(mat, from_state, to_state) {
+  if (is.null(mat) ||
+      !(from_state %in% rownames(mat) && to_state %in% colnames(mat))) {
+    return(NA_real_)
+  }
+  mat[from_state, to_state]
+}
+
+get_stationary_dist <- function(transition_matrix, states) {
+  n_states <- length(states)
+
+  tm <- transition_matrix
+  if (is.null(tm) || all(is.na(tm))) {
+    return(rep(NA_real_, n_states))
+  }
+
+  for (i in seq_len(nrow(tm))) {
+    row_vals <- tm[i, ]
+    if (all(is.na(row_vals))) next
+    row_vals[is.na(row_vals)] <- 0
+    rs <- sum(row_vals)
+    if (rs > 0) tm[i, ] <- row_vals / rs
+  }
+
+  row_sums <- rowSums(tm, na.rm = TRUE)
+  used_idx <- which(row_sums > 0)
+
+  if (length(used_idx) == 0) {
+    return(rep(NA_real_, n_states))
+  }
+
+  sub_tm <- tm[used_idx, used_idx, drop = FALSE]
+  for (i in seq_len(nrow(sub_tm))) {
+    rs <- sum(sub_tm[i, ])
+    if (rs > 0) sub_tm[i, ] <- sub_tm[i, ] / rs
+  }
+
+  mc <- tryCatch(
+    new("markovchain",
+        states = states[used_idx],
+        transitionMatrix = sub_tm,
+        name = "Chain"),
+    error = function(e) NULL
+  )
+  if (is.null(mc)) {
+    return(rep(NA_real_, n_states))
+  }
+
+  stat_used <- tryCatch(
+    as.numeric(steadyStates(mc)[1, ]),
+    error = function(e) rep(NA_real_, length(used_idx))
+  )
+
+  stat <- numeric(n_states)
+  stat[] <- 0
+  stat[used_idx] <- stat_used
+  names(stat) <- states
+  stat
+}
+
+# ---------------------------------------------------------------
+# 3. Bootstrap p-values for one cell (BP vs Control)
+# ---------------------------------------------------------------
+bootstrap_cell_pvals <- function(data, from_state, to_state,
+                                 group1, group2, R = 1000) {
+  diffs <- replicate(R, {
+    sample_g1 <- sample(unique(data$PtID[data$TrtGroup == group1]), replace = TRUE)
+    sample_g2 <- sample(unique(data$PtID[data$TrtGroup == group2]), replace = TRUE)
+
+    mats_g1 <- data %>%
+      filter(TrtGroup == group1, PtID %in% sample_g1) %>%
+      pull(transitionMatrix)
+    mats_g2 <- data %>%
+      filter(TrtGroup == group2, PtID %in% sample_g2) %>%
+      pull(transitionMatrix)
+
+    val_g1 <- mean(
+      map_dbl(mats_g1, ~extract_transition_value(.x, from_state, to_state)),
+      na.rm = TRUE
+    )
+    val_g2 <- mean(
+      map_dbl(mats_g2, ~extract_transition_value(.x, from_state, to_state)),
+      na.rm = TRUE
+    )
+    val_g1 - val_g2
+  })
+
+  diffs <- diffs[!is.na(diffs)]
+  if (!length(diffs)) return(NA_real_)
+
+  2 * min(mean(diffs >= 0, na.rm = TRUE),
+          mean(diffs <= 0, na.rm = TRUE))
+}
+
+# ---------------------------------------------------------------
+# 4. Global colour limits (per age); ALL periods use limited_id
+# ---------------------------------------------------------------
+get_group_diff_vals_lim <- function(data, age, periods,
+                                    group1 = "BP", group2 = "Control") {
+  all_diffs <- c()
+  for (period in periods) {
+    subdata <- data %>%
+      filter(Peds_age == age,
+             Rct_period == period,
+             PtID %in% limited_id)
+
+    mats_bp   <- subdata %>% filter(TrtGroup == group1) %>% pull(transitionMatrix)
+    mats_ctrl <- subdata %>% filter(TrtGroup == group2) %>% pull(transitionMatrix)
+    tm_bp   <- average_transition_matrix(tibble(transitionMatrix = mats_bp))
+    tm_ctrl <- average_transition_matrix(tibble(transitionMatrix = mats_ctrl))
+    diff_matrix <- tm_bp - tm_ctrl
+    all_diffs   <- c(all_diffs, as.vector(diff_matrix))
+  }
+  max(abs(all_diffs), na.rm = TRUE) %>% round(2) + 0.01
+}
+
+# ---------------------------------------------------------------
+# 5. Plotting function (ALL periods limited-id, Bonferroni stars)
+# ---------------------------------------------------------------
+create_enhanced_heatmap_lim <- function(data, age, period,
+                                        group1 = "BP", group2 = "Control",
+                                        R = 1000, global_limit,
+                                        min_effect = 0.001) {
+
+  subdata <- data %>%
+    filter(Peds_age == age,
+           Rct_period == period,
+           PtID %in% limited_id)
+
+  mats_bp   <- subdata %>% filter(TrtGroup == group1) %>% pull(transitionMatrix)
+  mats_ctrl <- subdata %>% filter(TrtGroup == group2) %>% pull(transitionMatrix)
+
+  tm_bp   <- average_transition_matrix(tibble(transitionMatrix = mats_bp))
+  tm_ctrl <- average_transition_matrix(tibble(transitionMatrix = mats_ctrl))
+
+  marginal_bp   <- get_stationary_dist(tm_bp,   states_order_long)
+  marginal_ctrl <- get_stationary_dist(tm_ctrl, states_order_long)
+
+  diff_matrix <- tm_bp - tm_ctrl
+  diff_df <- as.data.frame(as.table(diff_matrix))
+  colnames(diff_df) <- c("From", "To", "Diff")
+
+  diff_df$To   <- factor(diff_df$To,   levels = rev(states_order_long))
+  diff_df$From <- factor(diff_df$From, levels = rev(states_order_long))
+
+  diff_df$Pval <- purrr::pmap_dbl(
+    diff_df[, c("From", "To")],
+    function(From, To)
+      tryCatch(
+        bootstrap_cell_pvals(
+          subdata,
+          as.character(From),
+          as.character(To),
+          group1,
+          group2,
+          R = R
+        ),
+        error = function(e) NA_real_
+      )
+  )
+
+  diff_df$Pval_adj <- p.adjust(diff_df$Pval, method = "bonferroni")
+
+  Star_raw <- cut(
+    diff_df$Pval_adj,
+    breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+    labels = c("***", "**", "*", ""),
+    right  = TRUE
+  )
+
+  diff_df$Star <- ifelse(
+    abs(diff_df$Diff) < min_effect | is.na(Star_raw),
+    "",
+    as.character(Star_raw)
+  )
+
+  fmt_pct <- function(x) ifelse(is.na(x), "NA", sprintf("%.1f%%", 100 * x))
+
+  states_plot    <- levels(diff_df$From)
+  marg_ctrl_plot <- marginal_ctrl[states_plot]
+  marg_bp_plot   <- marginal_bp[states_plot]
+
+  y_labels <- sprintf(
+    "%s (%s, %s)",
+    states_plot,
+    fmt_pct(marg_ctrl_plot),
+    fmt_pct(marg_bp_plot)
+  )
+  names(y_labels) <- states_plot
+
+  n_bp   <- subdata %>% filter(TrtGroup == group1) %>%
+    summarise(n = n_distinct(PtID)) %>% pull(n)
+  n_ctrl <- subdata %>% filter(TrtGroup == group2) %>%
+    summarise(n = n_distinct(PtID)) %>% pull(n)
+
+  ggplot(diff_df, aes(x = To, y = From, fill = Diff)) +
+    geom_tile(color = "white") +
+    geom_text(
+      aes(label = Star),
+      color = "black",
+      size = 6,
+      fontface = "bold",
+      na.rm = TRUE
+    ) +
+    scale_fill_gradient2(
+      low      = "blue",
+      mid      = "white",
+      high     = "red",
+      midpoint = 0,
+      limits   = c(-global_limit, global_limit),
+      name     = "Diff (BP - Control)"
+    ) +
+    scale_y_discrete(labels = y_labels) +
+    scale_x_discrete(labels = short_names[levels(diff_df$To)]) +
+    labs(
+      title = paste0(
+        "Age: ", toTitleCase(age),
+        " | Period: ", period,
+        " (limited-id; BP n=", n_bp, ", Control n=", n_ctrl, ")"
+      ),
+      x = "To State",
+      y = "From State (Control %, BP %)"
+    ) +
+    theme_minimal(base_size = 15) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      plot.title  = element_text(size = 14, face = "bold", hjust = 0.5),
+      axis.text.y = element_text(size = 12)
+    )
+}
+
+# ---------------------------------------------------------------
+# 6. Main loop: all periods limited-id
+# ---------------------------------------------------------------
+age_groups <- c("adults", "children")
+periods    <- c("Baseline", "RCT", "Weeks 1-4", "Weeks 5-8", "Weeks 9-12")
+
+global_limits_lim <- list()
+for (age in age_groups) {
+  global_limits_lim[[age]] <- get_group_diff_vals_lim(
+    all_transitions2,
+    age,
+    periods,
+    "BP",
+    "Control"
+  )
+}
+
+plot_list_lim <- list()
+for (age in age_groups) {
+  for (period in periods) {
+    plot_list_lim[[paste(age, period, sep = "_")]] <-
+      create_enhanced_heatmap_lim(
+        all_transitions2,
+        age         = age,
+        period      = period,
+        group1      = "BP",
+        group2      = "Control",
+        R           = 1000,
+        global_limit = global_limits_lim[[age]]
+      )
+  }
+}
+
+final_plot_lim <- wrap_plots(plot_list_lim, ncol = 2, byrow = FALSE) +
+  plot_annotation(
+    title    = "Differences in Transition Probabilities (BP - Control), Limited-id Across All Periods",
+    subtitle = "All panels restricted to limited-id subset; Bonferroni-adjusted significance (*, **, ***)"
+  )
+
+final_plot_lim
+ggsave("./figure1/transition_probability_diff_heatmaps_significance_limitedid_allperiods.png",        final_plot_lim, width = 16, height = 18, dpi = 300)
+```
+
+### With-in Participants Transition Probability - limited id
+#### Data
+```{r}
+## ------------------------------------------------------------
+## 1. Build data for limited_id
+## ------------------------------------------------------------
+
+iobp2_f2 <- iobp2 %>%
+  filter(PtID %in% limited_id) %>%
+  filter(DeviceDtTm < RandDt + weeks(12)) %>%
+  mutate(
+    Rct_period = case_when(
+      DeviceDtTm < RandDt ~ "Baseline",
+      DeviceDtTm >= RandDt & DeviceDtTm < RandDt + weeks(12) ~ "RCT",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Rct_period)) %>%
+  mutate(
+    Level = factor(
+      case_when(
+        Value >= 250 ~ "Level 2 hyperglycemia",
+        Value >= 181 ~ "Level 1 hyperglycemia",
+        Value >= 70  ~ "In range",
+        Value >= 54  ~ "Level 1 hypoglycemia",
+        Value <  54  ~ "Level 2 hypoglycemia"
+      ),
+      levels = states_order_long   # Hypo2 -> Hyper2
+    )
+  )
+```
+
+
+
+```{r, fig.height=12, fig.width=20}
+
+## ------------------------------------------------------------
+## 2. Build wide data from all_transitions2 (Baseline / RCT)
+## ------------------------------------------------------------
+library(dplyr)
+library(lubridate)
+library(purrr)
+library(tidyr)
+library(markovchain)
+library(ggplot2)
+library(patchwork)
+library(forcats)
+
+set.seed(777)
+
+# Plot order (Hyper2 → Hypo2 as in previous figure)
+states_order <- c(
+  "Level 2 hyperglycemia",
+  "Level 1 hyperglycemia",
+  "In range",
+  "Level 1 hypoglycemia",
+  "Level 2 hypoglycemia"
+)
+
+short_names <- c(
+  "Level 2 hypoglycemia"  = "L2 Hypo",
+  "Level 1 hypoglycemia"  = "L1 Hypo",
+  "In range"              = "In Range",
+  "Level 1 hyperglycemia" = "L1 Hyper",
+  "Level 2 hyperglycemia" = "L2 Hyper"
+)
+
+# Use subject-level transition matrices from all_transitions2
+# For differences and p-values, keep only subjects with BOTH Baseline and RCT matrices
+indiv_wide <- all_transitions2 %>%
+  filter(
+    PtID %in% limited_id,
+    Rct_period %in% c("Baseline", "RCT")
+  ) %>%
+  select(PtID, TrtGroup, Peds_age, Rct_period, transitionMatrix) %>%
+  tidyr::pivot_wider(
+    names_from  = Rct_period,
+    values_from = transitionMatrix
+  ) %>%
+  filter(
+    !purrr::map_lgl(Baseline, is.null),
+    !purrr::map_lgl(RCT,      is.null)
+  )
+
+## ------------------------------------------------------------
+## 3. Helpers: align matrices, average ignoring NA
+## ------------------------------------------------------------
+align_matrix <- function(mat) {
+  m <- matrix(
+    NA_real_,
+    nrow = length(states_order),
+    ncol = length(states_order),
+    dimnames = list(states_order, states_order)
+  )
+  if (!is.null(mat)) {
+    rows <- intersect(states_order, rownames(mat))
+    cols <- intersect(states_order, colnames(mat))
+    m[rows, cols] <- mat[rows, cols, drop = FALSE]
+  }
+  m
+}
+
+average_matrices_ignore_na <- function(mats) {
+  n_states <- length(states_order)
+  if (length(mats) == 0) {
+    return(matrix(
+      NA_real_,
+      nrow = n_states,
+      ncol = n_states,
+      dimnames = list(states_order, states_order)
+    ))
+  }
+
+  aligned <- lapply(mats, align_matrix)
+  arr <- simplify2array(aligned)
+
+  avg <- apply(arr, c(1, 2), function(x) {
+    if (all(is.na(x))) NA_real_ else mean(x, na.rm = TRUE)
+  })
+
+  dimnames(avg) <- list(states_order, states_order)
+  avg
+}
+
+extract_transition_value <- function(mat, from_state, to_state) {
+  if (is.null(mat)) return(NA_real_)
+  if (!(from_state %in% rownames(mat) && to_state %in% colnames(mat))) return(NA_real_)
+  mat[from_state, to_state]
+}
+
+## ------------------------------------------------------------
+## 4. Bootstrap p-value (within-subject, centered)
+## ------------------------------------------------------------
+bootstrap_pval_within <- function(baseline_vals, rct_vals, R = 1000) {
+  idx <- which(!is.na(baseline_vals) & !is.na(rct_vals))
+  baseline_vals <- baseline_vals[idx]
+  rct_vals      <- rct_vals[idx]
+
+  if (length(baseline_vals) < 2) return(NA_real_)
+
+  obs_diffs <- rct_vals - baseline_vals
+  obs_mean  <- mean(obs_diffs)
+
+  centered_diffs <- obs_diffs - mean(obs_diffs)
+  boot_means <- replicate(R, mean(sample(centered_diffs, replace = TRUE)))
+  mean(abs(boot_means) >= abs(obs_mean))
+}
+
+## ------------------------------------------------------------
+## 5. Group-level difference matrices and global limits
+## ------------------------------------------------------------
+get_diff_matrix <- function(indiv_wide, trt, age) {
+  subdat <- indiv_wide %>% filter(TrtGroup == trt, Peds_age == age)
+  if (nrow(subdat) == 0) {
+    return(matrix(
+      0,
+      nrow = length(states_order),
+      ncol = length(states_order),
+      dimnames = list(states_order, states_order)
+    ))
+  }
+
+  baseline_mats <- map(subdat$Baseline, align_matrix)
+  rct_mats      <- map(subdat$RCT,      align_matrix)
+
+  mean_base <- average_matrices_ignore_na(baseline_mats)
+  mean_rct  <- average_matrices_ignore_na(rct_mats)
+
+  mean_rct - mean_base
+}
+
+for (trt in c("BP", "Control")) {
+  for (age in c("adults", "children")) {
+    cat("\n--- Difference in transition matrix for", trt, "-", age, "---\n")
+    diff_mat <- get_diff_matrix(indiv_wide, trt, age)
+    print(round(diff_mat, 3))
+  }
+}
+
+age_groups <- c("adults", "children")
+
+limits_by_trt <- list()
+for (trt in c("BP", "Control")) {
+  diff_adults   <- get_diff_matrix(indiv_wide, trt, "adults")
+  diff_children <- get_diff_matrix(indiv_wide, trt, "children")
+  max_val <- max(abs(c(diff_adults, diff_children)), na.rm = TRUE)
+  limits_by_trt[[trt]] <- round(max_val, 3) + 0.01
+}
+
+## ------------------------------------------------------------
+## 6. Marginal probabilities and n from ALL limited-id PtIDs
+## ------------------------------------------------------------
+# iobp2_f2 is assumed to be created earlier:
+# iobp2_f2 <- iobp2 %>% filter(PtID %in% limited_id) %>% ...
+
+get_group_marginals <- function(trt, age) {
+  gdat <- iobp2_f2 %>%
+    filter(TrtGroup == trt, Peds_age == age)
+
+  # n = all PtIDs in this treatment/age among limited_id
+  n_group <- n_distinct(gdat$PtID)
+
+  marg <- gdat %>%
+    group_by(Rct_period, Level) %>%
+    summarise(n_points = n(), .groups = "drop_last") %>%
+    mutate(total_points = sum(n_points), prob = n_points / total_points) %>%
+    ungroup()
+
+  baseline_prob <- rep(NA_real_, length(states_order))
+  rct_prob      <- rep(NA_real_, length(states_order))
+  names(baseline_prob) <- names(rct_prob) <- states_order
+
+  for (st in states_order) {
+    baseline_prob[st] <- marg %>%
+      filter(Rct_period == "Baseline", Level == st) %>%
+      summarise(p = ifelse(n() == 0, NA_real_, sum(prob))) %>%
+      pull(p)
+    rct_prob[st] <- marg %>%
+      filter(Rct_period == "RCT", Level == st) %>%
+      summarise(p = ifelse(n() == 0, NA_real_, sum(prob))) %>%
+      pull(p)
+  }
+
+  list(
+    n_group        = n_group,
+    baseline_prob  = baseline_prob,
+    rct_prob       = rct_prob
+  )
+}
+
+## ------------------------------------------------------------
+## 7. Plotting function (original diff + Bonferroni p-values)
+## ------------------------------------------------------------
+plot_within_indiv_transition_diff <- function(indiv_wide, trt, age,
+                                              R = 1000, color_limit = NULL) {
+  subdat <- indiv_wide %>% filter(TrtGroup == trt, Peds_age == age)
+  if (nrow(subdat) == 0) return(NULL)
+
+  # For n and marginals: use ALL limited-id PtIDs
+  gm <- get_group_marginals(trt, age)
+  n_group       <- gm$n_group
+  marginal_base <- gm$baseline_prob
+  marginal_rct  <- gm$rct_prob
+
+  baseline_mats <- map(subdat$Baseline, align_matrix)
+  rct_mats      <- map(subdat$RCT,      align_matrix)
+
+  mean_base <- average_matrices_ignore_na(baseline_mats)
+  mean_rct  <- average_matrices_ignore_na(rct_mats)
+
+  fmt_pct <- function(x) sprintf("%.1f%%", 100 * x)
+  y_labels <- sprintf(
+    "%s (%s, %s)",
+    states_order,
+    fmt_pct(marginal_base),
+    fmt_pct(marginal_rct)
+  )
+  names(y_labels) <- states_order
+
+  diff_matrix <- mean_rct - mean_base
+
+  plot_df <- expand.grid(
+    From = states_order,
+    To   = states_order,
+    stringsAsFactors = FALSE
+  ) %>%
+    mutate(
+      Diff = mapply(function(f, t) diff_matrix[f, t], From, To),
+      Pval = NA_real_
+    )
+
+  for (i in seq_len(nrow(plot_df))) {
+    f <- plot_df$From[i]
+    t <- plot_df$To[i]
+    base_vals <- purrr::map_dbl(
+      baseline_mats,
+      extract_transition_value,
+      from_state = f,
+      to_state   = t
+    )
+    rct_vals  <- purrr::map_dbl(
+      rct_mats,
+      extract_transition_value,
+      from_state = f,
+      to_state   = t
+    )
+    plot_df$Pval[i] <- bootstrap_pval_within(base_vals, rct_vals, R = R)
+  }
+
+  # Bonferroni-adjusted p-values across the 25 cells in this matrix
+  plot_df <- plot_df %>%
+    mutate(
+      Pval_adj = p.adjust(Pval, method = "bonferroni"),
+      Star = ifelse(
+        abs(Diff) < 0.004,
+        "",
+        as.character(cut(
+          Pval_adj,
+          breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+          labels = c("***", "**", "*", ""),
+          right  = TRUE
+        ))
+      ),
+      ToShort = short_names[To],
+      From    = factor(From, levels = rev(states_order)),
+      ToShort = factor(ToShort, levels = rev(short_names[states_order]))
+    )
+
+  if (is.null(color_limit)) {
+    color_limit <- max(abs(plot_df$Diff), na.rm = TRUE) %>% round(3) + 0.01
+  }
+
+  ggplot(plot_df, aes(x = ToShort, y = From, fill = Diff)) +
+    geom_tile(color = "white") +
+    geom_text(
+      aes(label = Star),
+      size = 7,
+      color = "black",
+      fontface = "bold",
+      lineheight = 0.8,
+      na.rm = TRUE
+    ) +
+    scale_fill_gradient2(
+      low      = "blue",
+      mid      = "white",
+      high     = "red",
+      midpoint = 0,
+      limits   = c(-color_limit, color_limit),
+      name     = "RCT - Baseline"
+    ) +
+    scale_y_discrete(labels = y_labels[rev(states_order)]) +
+    labs(
+      title = sprintf(
+        "Within-Individual Transition Change: %s, %s (n=%d)",
+        trt, tools::toTitleCase(age), n_group
+      ),
+      x = "To State",
+      y = "From State (Baseline %, RCT %)"
+    ) +
+    theme_minimal(base_size = 15) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.text.y = element_text(size = 15),
+      plot.title  = element_text(size = 16, face = "bold", hjust = 0.5)
+    )
+}
+
+## ------------------------------------------------------------
+## 8. Generate plots for all groups
+## ------------------------------------------------------------
+plots <- list()
+for (trt in c("BP", "Control")) {
+  for (age in age_groups) {
+    plots[[paste(trt, age, sep = "_")]] <-
+      plot_within_indiv_transition_diff(
+        indiv_wide,
+        trt,
+        age,
+        R           = 1000,
+        color_limit = limits_by_trt[[trt]]
+      )
+  }
+}
+
+final_plot <- (plots[["BP_adults"]] | plots[["BP_children"]]) /
+  (plots[["Control_adults"]] | plots[["Control_children"]]) +
+  patchwork::plot_annotation(
+    title    = "Within-Individual Changes in Transition Probabilities (RCT - Baseline)",
+    subtitle = "Scale shared within each treatment arm; Y-axis shows marginal probabilities (Baseline %, RCT %) and n includes all limited-id participants in each group. Stars use Bonferroni-adjusted p-values."
+  )
+
+final_plot
+#ggsave("./figure1/transition_probability_diff_RCT_vs_Baseline_PtID_2weeks.png",        final_plot, width = 18, height = 9, dpi = 300)
+
+```
+
+```{r within-baseline-rct-prob, fig.height=10, fig.width=10}
+# This chunk assumes:
+# - indiv_wide, states_order, and short_names have already been defined
+# - align_matrix() and average_matrices_ignore_na() are available
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+age_groups  <- c("adults", "children")
+trt_levels  <- c("Control", "BP")
+period_lvls <- c("Baseline", "RCT")
+
+# Helper: row-normalize a matrix so each row sums to 1 (if any non-NA)
+row_normalize <- function(mat) {
+  if (is.null(mat)) return(mat)
+  for (i in seq_len(nrow(mat))) {
+    row_vals <- mat[i, ]
+    if (all(is.na(row_vals))) next
+    row_vals[is.na(row_vals)] <- 0
+    rs <- sum(row_vals)
+    if (rs > 0) mat[i, ] <- row_vals / rs
+  }
+  mat
+}
+
+# Helper: get mean transition matrix for a given treatment, age, and period
+# and then enforce row sums of 1
+mean_mat_for <- function(trt, age, period) {
+  subdat <- indiv_wide %>%
+    filter(TrtGroup == trt, Peds_age == age)
+
+  if (nrow(subdat) == 0) {
+    return(matrix(
+      NA_real_,
+      nrow = length(states_order),
+      ncol = length(states_order),
+      dimnames = list(states_order, states_order)
+    ))
+  }
+
+  mats <- if (period == "Baseline") subdat$Baseline else subdat$RCT
+
+  avg_mat <- average_matrices_ignore_na(mats)
+  avg_mat <- row_normalize(avg_mat)   # ensure each row sums to 1
+  avg_mat
+}
+
+# Build tidy data frame with Baseline and RCT mean matrices
+grid_specs <- expand.grid(
+  TrtGroup   = trt_levels,
+  Peds_age   = age_groups,
+  Rct_period = period_lvls,
+  stringsAsFactors = FALSE
+)
+
+tm_within <- grid_specs %>%
+  rowwise() %>%
+  mutate(M = list(mean_mat_for(TrtGroup, Peds_age, Rct_period))) %>%
+  ungroup() %>%
+  mutate(
+    mat_long = purrr::map(M, ~ {
+      df <- as.data.frame(as.table(.x), stringsAsFactors = FALSE)
+      names(df) <- c("From", "To", "Prob")
+      df
+    })
+  ) %>%
+  select(-M) %>%
+  unnest(mat_long) %>%
+  mutate(
+    Age        = factor(if_else(Peds_age == "adults", "Adults", "Children"),
+                        levels = c("Adults", "Children")),
+    TrtGroup   = factor(TrtGroup,   levels = c("Control", "BP")),
+    Rct_period = factor(Rct_period, levels = period_lvls),
+    From       = factor(From, levels = states_order),
+    To         = factor(To,   levels = states_order)
+  )
+
+reds <- c("#fff5f0", "#fcbba1", "#fb6a4a", "#a50f15")
+
+p_within_BR <- ggplot(tm_within, aes(x = To, y = From, fill = Prob)) +
+  geom_tile(color = "white") +
+  geom_text(
+    aes(
+      label  = ifelse(is.na(Prob), "", sprintf("%.3f", Prob)),
+      colour = ifelse(!is.na(Prob) & Prob > 0.8, "light", "dark")
+    ),
+    size = 3.2
+  ) +
+  scale_colour_manual(
+    values = c("dark" = "black", "light" = "white"),
+    guide = "none"
+  ) +
+  scale_fill_gradientn(
+    colors   = reds,
+    limits   = c(0, 1),
+    name     = "Probability",
+    na.value = "grey90"
+  ) +
+  # X: left to right = Hypo2 → Hyper2 (short labels)
+  scale_x_discrete(
+    limits = rev(states_order),
+    labels = short_names[rev(states_order)]
+  ) +
+  # Y: top to bottom = Hyper2 → Hypo2 (full labels)
+  scale_y_discrete(
+    limits = rev(states_order),
+    labels = rev(states_order)
+  ) +
+  coord_equal() +
+  facet_grid(
+    rows = vars(Rct_period),
+    cols = vars(Age, TrtGroup),
+    drop = FALSE
+  ) +
+  labs(
+    title    = "Mean Transition Probability Matrices (Baseline and RCT)",
+    subtitle = "Limited-id subset; within-individual analysis",
+    x = "To state",
+    y = "From state"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid       = element_blank(),
+    axis.text.x      = element_text(angle = 45, hjust = 1),
+    strip.text       = element_text(face = "bold"),
+    strip.placement  = "outside",
+    strip.background = element_blank(),
+    legend.position  = "right"
+  )
+
+p_within_BR
+ggsave("./figure1/Within_Baseline_RCT_mean_matrices.png",
+       p_within_BR, width = 14, height = 10, dpi = 300)
+```
+
+```{r value, fig.height=12, fig.width=20}
+
+## ------------------------------------------------------------
+## 2. Build wide data from all_transitions2 (Baseline / RCT)
+## ------------------------------------------------------------
+library(dplyr)
+library(lubridate)
+library(purrr)
+library(tidyr)
+library(markovchain)
+library(ggplot2)
+library(patchwork)
+library(forcats)
+
+set.seed(777)
+
+# Plot order (Hyper2 → Hypo2 as in previous figure)
+states_order <- c(
+  "Level 2 hyperglycemia",
+  "Level 1 hyperglycemia",
+  "In range",
+  "Level 1 hypoglycemia",
+  "Level 2 hypoglycemia"
+)
+
+short_names <- c(
+  "Level 2 hypoglycemia"  = "L2 Hypo",
+  "Level 1 hypoglycemia"  = "L1 Hypo",
+  "In range"              = "In Range",
+  "Level 1 hyperglycemia" = "L1 Hyper",
+  "Level 2 hyperglycemia" = "L2 Hyper"
+)
+
+# Use subject-level transition matrices from all_transitions2
+indiv_wide <- all_transitions2 %>%
+  filter(
+    PtID %in% limited_id,
+    Rct_period %in% c("Baseline", "RCT")
+  ) %>%
+  select(PtID, TrtGroup, Peds_age, Rct_period, transitionMatrix) %>%
+  tidyr::pivot_wider(
+    names_from  = Rct_period,
+    values_from = transitionMatrix
+  ) %>%
+  filter(
+    !purrr::map_lgl(Baseline, is.null),
+    !purrr::map_lgl(RCT,      is.null)
+  )
+
+## ------------------------------------------------------------
+## 3. Helpers: align matrices, average ignoring NA
+## ------------------------------------------------------------
+align_matrix <- function(mat) {
+  m <- matrix(
+    NA_real_,
+    nrow = length(states_order),
+    ncol = length(states_order),
+    dimnames = list(states_order, states_order)
+  )
+  if (!is.null(mat)) {
+    rows <- intersect(states_order, rownames(mat))
+    cols <- intersect(states_order, colnames(mat))
+    m[rows, cols] <- mat[rows, cols, drop = FALSE]
+  }
+  m
+}
+
+average_matrices_ignore_na <- function(mats) {
+  n_states <- length(states_order)
+  if (length(mats) == 0) {
+    return(matrix(
+      NA_real_,
+      nrow = n_states,
+      ncol = n_states,
+      dimnames = list(states_order, states_order)
+    ))
+  }
+
+  aligned <- lapply(mats, align_matrix)
+  arr <- simplify2array(aligned)
+
+  avg <- apply(arr, c(1, 2), function(x) {
+    if (all(is.na(x))) NA_real_ else mean(x, na.rm = TRUE)
+  })
+
+  dimnames(avg) <- list(states_order, states_order)
+  avg
+}
+
+extract_transition_value <- function(mat, from_state, to_state) {
+  if (is.null(mat)) return(NA_real_)
+  if (!(from_state %in% rownames(mat) && to_state %in% colnames(mat))) return(NA_real_)
+  mat[from_state, to_state]
+}
+
+## ------------------------------------------------------------
+## 4. Bootstrap p-value (within-subject, centered)
+## ------------------------------------------------------------
+bootstrap_pval_within <- function(baseline_vals, rct_vals, R = 1000) {
+  idx <- which(!is.na(baseline_vals) & !is.na(rct_vals))
+  baseline_vals <- baseline_vals[idx]
+  rct_vals      <- rct_vals[idx]
+
+  if (length(baseline_vals) < 2) return(NA_real_)
+
+  obs_diffs <- rct_vals - baseline_vals
+  obs_mean  <- mean(obs_diffs)
+
+  centered_diffs <- obs_diffs - mean(obs_diffs)
+  boot_means <- replicate(R, mean(sample(centered_diffs, replace = TRUE)))
+  mean(abs(boot_means) >= abs(obs_mean))
+}
+
+## ------------------------------------------------------------
+## 5. Group-level difference matrices and global limits
+## ------------------------------------------------------------
+get_diff_matrix <- function(indiv_wide, trt, age) {
+  subdat <- indiv_wide %>% filter(TrtGroup == trt, Peds_age == age)
+  if (nrow(subdat) == 0) {
+    return(matrix(
+      0,
+      nrow = length(states_order),
+      ncol = length(states_order),
+      dimnames = list(states_order, states_order)
+    ))
+  }
+
+  baseline_mats <- map(subdat$Baseline, align_matrix)
+  rct_mats      <- map(subdat$RCT,      align_matrix)
+
+  mean_base <- average_matrices_ignore_na(baseline_mats)
+  mean_rct  <- average_matrices_ignore_na(rct_mats)
+
+  mean_rct - mean_base
+}
+
+for (trt in c("BP", "Control")) {
+  for (age in c("adults", "children")) {
+    cat("\n--- Difference in transition matrix for", trt, "-", age, "---\n")
+    diff_mat <- get_diff_matrix(indiv_wide, trt, age)
+    print(round(diff_mat, 3))
+  }
+}
+
+age_groups <- c("adults", "children")
+
+limits_by_trt <- list()
+for (trt in c("BP", "Control")) {
+  diff_adults   <- get_diff_matrix(indiv_wide, trt, "adults")
+  diff_children <- get_diff_matrix(indiv_wide, trt, "children")
+  max_val <- max(abs(c(diff_adults, diff_children)), na.rm = TRUE)
+  limits_by_trt[[trt]] <- round(max_val, 3) + 0.01
+}
+
+## ------------------------------------------------------------
+## 6. Marginal probabilities and n from ALL limited-id PtIDs
+## ------------------------------------------------------------
+get_group_marginals <- function(trt, age) {
+  gdat <- iobp2_f2 %>%
+    filter(TrtGroup == trt, Peds_age == age)
+
+  n_group <- n_distinct(gdat$PtID)
+
+  marg <- gdat %>%
+    group_by(Rct_period, Level) %>%
+    summarise(n_points = n(), .groups = "drop_last") %>%
+    mutate(total_points = sum(n_points), prob = n_points / total_points) %>%
+    ungroup()
+
+  baseline_prob <- rep(NA_real_, length(states_order))
+  rct_prob      <- rep(NA_real_, length(states_order))
+  names(baseline_prob) <- names(rct_prob) <- states_order
+
+  for (st in states_order) {
+    baseline_prob[st] <- marg %>%
+      filter(Rct_period == "Baseline", Level == st) %>%
+      summarise(p = ifelse(n() == 0, NA_real_, sum(prob))) %>%
+      pull(p)
+    rct_prob[st] <- marg %>%
+      filter(Rct_period == "RCT", Level == st) %>%
+      summarise(p = ifelse(n() == 0, NA_real_, sum(prob))) %>%
+      pull(p)
+  }
+
+  list(
+    n_group        = n_group,
+    baseline_prob  = baseline_prob,
+    rct_prob       = rct_prob
+  )
+}
+
+## ------------------------------------------------------------
+## 7. Plotting function (now also shows numeric differences)
+## ------------------------------------------------------------
+plot_within_indiv_transition_diff <- function(indiv_wide, trt, age,
+                                              R = 1000, color_limit = NULL) {
+  subdat <- indiv_wide %>% filter(TrtGroup == trt, Peds_age == age)
+  if (nrow(subdat) == 0) return(NULL)
+
+  gm <- get_group_marginals(trt, age)
+  n_group       <- gm$n_group
+  marginal_base <- gm$baseline_prob
+  marginal_rct  <- gm$rct_prob
+
+  baseline_mats <- map(subdat$Baseline, align_matrix)
+  rct_mats      <- map(subdat$RCT,      align_matrix)
+
+  mean_base <- average_matrices_ignore_na(baseline_mats)
+  mean_rct  <- average_matrices_ignore_na(rct_mats)
+
+  fmt_pct <- function(x) sprintf("%.1f%%", 100 * x)
+  y_labels <- sprintf(
+    "%s (%s, %s)",
+    states_order,
+    fmt_pct(marginal_base),
+    fmt_pct(marginal_rct)
+  )
+  names(y_labels) <- states_order
+
+  diff_matrix <- mean_rct - mean_base
+
+  plot_df <- expand.grid(
+    From = states_order,
+    To   = states_order,
+    stringsAsFactors = FALSE
+  ) %>%
+    mutate(
+      Diff = mapply(function(f, t) diff_matrix[f, t], From, To),
+      Pval = NA_real_
+    )
+
+  for (i in seq_len(nrow(plot_df))) {
+    f <- plot_df$From[i]
+    t <- plot_df$To[i]
+    base_vals <- purrr::map_dbl(
+      baseline_mats,
+      extract_transition_value,
+      from_state = f,
+      to_state   = t
+    )
+    rct_vals  <- purrr::map_dbl(
+      rct_mats,
+      extract_transition_value,
+      from_state = f,
+      to_state   = t
+    )
+    plot_df$Pval[i] <- bootstrap_pval_within(base_vals, rct_vals, R = R)
+  }
+
+  # Bonferroni-adjusted p-values and combined label: diff + stars
+  plot_df <- plot_df %>%
+    mutate(
+      Pval_adj = p.adjust(Pval, method = "bonferroni"),
+      Star = ifelse(
+        abs(Diff) < 0.002,
+        "",
+        as.character(cut(
+          Pval_adj,
+          breaks = c(-Inf, 0.001, 0.01, 0.15, Inf),
+          labels = c("***", "**", "*", ""),
+          right  = TRUE
+        ))
+      ),
+      # numeric diff plus (optional) star on next line
+      Label = dplyr::case_when(
+        is.na(Diff)                    ~ "",
+        Star == ""                     ~ sprintf("%.3f", Diff),
+        TRUE                           ~ paste0(sprintf("%.3f", Diff), "\n", Star)
+      ),
+      ToShort = short_names[To],
+      From    = factor(From, levels = rev(states_order)),
+      ToShort = factor(ToShort, levels = rev(short_names[states_order]))
+    )
+
+  if (is.null(color_limit)) {
+    color_limit <- max(abs(plot_df$Diff), na.rm = TRUE) %>% round(3) + 0.01
+  }
+
+  ggplot(plot_df, aes(x = ToShort, y = From, fill = Diff)) +
+    geom_tile(color = "white") +
+    geom_text(
+      aes(label = Label,
+          colour = ifelse(is.na(Diff) | abs(Diff) <= 0.02, "dark", "light")),
+      size = 3.8,
+      fontface = "bold",
+      lineheight = 0.9,
+      na.rm = TRUE
+    ) +
+    scale_colour_manual(
+      values = c("dark" = "black", "light" = "white"),
+      guide = "none"
+    ) +
+    scale_fill_gradient2(
+      low      = "blue",
+      mid      = "white",
+      high     = "red",
+      midpoint = 0,
+      limits   = c(-color_limit, color_limit),
+      name     = "RCT - Baseline"
+    ) +
+    scale_y_discrete(labels = y_labels[rev(states_order)]) +
+    labs(
+      title = sprintf(
+        "Within-Individual Transition Change: %s, %s (n=%d)",
+        trt, tools::toTitleCase(age), n_group
+      ),
+      x = "To State",
+      y = "From State (Baseline %, RCT %)"
+    ) +
+    theme_minimal(base_size = 15) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.text.y = element_text(size = 15),
+      plot.title  = element_text(size = 16, face = "bold", hjust = 0.5)
+    )
+}
+
+## ------------------------------------------------------------
+## 8. Generate plots for all groups
+## ------------------------------------------------------------
+plots <- list()
+for (trt in c("BP", "Control")) {
+  for (age in age_groups) {
+    plots[[paste(trt, age, sep = "_")]] <-
+      plot_within_indiv_transition_diff(
+        indiv_wide,
+        trt,
+        age,
+        R           = 1000,
+        color_limit = limits_by_trt[[trt]]
+      )
+  }
+}
+
+final_plot <- (plots[["BP_adults"]] | plots[["BP_children"]]) /
+  (plots[["Control_adults"]] | plots[["Control_children"]]) +
+  patchwork::plot_annotation(
+    title    = "Within-Individual Changes in Transition Probabilities (RCT - Baseline)",
+    subtitle = "Scale shared within each treatment arm; Y-axis shows marginal probabilities (Baseline %, RCT %).\nEach cell shows the mean difference (RCT − Baseline) and Bonferroni-adjusted significance (*, **, ***)."
+  )
+
+final_plot
+ggsave("./figure1/transition_probability_diff_RCT_vs_Baseline_PtID_2weeks_value.png",final_plot, width = 18, height = 9, dpi = 300)
+
+```
+
+```{r value with ci, fig.height=12, fig.width=20}
+
+## ------------------------------------------------------------
+## 2. Build wide data from all_transitions2 (Baseline / RCT)
+## ------------------------------------------------------------
+library(dplyr)
+library(lubridate)
+library(purrr)
+library(tidyr)
+library(markovchain)
+library(ggplot2)
+library(patchwork)
+library(forcats)
+
+set.seed(555)
+
+states_order <- c(
+  "Level 2 hyperglycemia",
+  "Level 1 hyperglycemia",
+  "In range",
+  "Level 1 hypoglycemia",
+  "Level 2 hypoglycemia"
+)
+
+short_names <- c(
+  "Level 2 hypoglycemia"  = "L2 Hypo",
+  "Level 1 hypoglycemia"  = "L1 Hypo",
+  "In range"              = "In Range",
+  "Level 1 hyperglycemia" = "L1 Hyper",
+  "Level 2 hyperglycemia" = "L2 Hyper"
+)
+
+indiv_wide <- all_transitions2 %>%
+  filter(
+    PtID %in% limited_id,
+    Rct_period %in% c("Baseline", "RCT")
+  ) %>%
+  select(PtID, TrtGroup, Peds_age, Rct_period, transitionMatrix) %>%
+  tidyr::pivot_wider(
+    names_from  = Rct_period,
+    values_from = transitionMatrix
+  ) %>%
+  filter(
+    !purrr::map_lgl(Baseline, is.null),
+    !purrr::map_lgl(RCT,      is.null)
+  )
+
+## ------------------------------------------------------------
+## 3. Helpers
+## ------------------------------------------------------------
+align_matrix <- function(mat) {
+  m <- matrix(
+    NA_real_,
+    nrow = length(states_order),
+    ncol = length(states_order),
+    dimnames = list(states_order, states_order)
+  )
+  if (!is.null(mat)) {
+    rows <- intersect(states_order, rownames(mat))
+    cols <- intersect(states_order, colnames(mat))
+    m[rows, cols] <- mat[rows, cols, drop = FALSE]
+  }
+  m
+}
+
+average_matrices_ignore_na <- function(mats) {
+  n_states <- length(states_order)
+  if (length(mats) == 0) {
+    return(matrix(
+      NA_real_,
+      nrow = n_states,
+      ncol = n_states,
+      dimnames = list(states_order, states_order)
+    ))
+  }
+
+  aligned <- lapply(mats, align_matrix)
+  arr <- simplify2array(aligned)
+
+  avg <- apply(arr, c(1, 2), function(x) {
+    if (all(is.na(x))) NA_real_ else mean(x, na.rm = TRUE)
+  })
+
+  dimnames(avg) <- list(states_order, states_order)
+  avg
+}
+
+extract_transition_value <- function(mat, from_state, to_state) {
+  if (is.null(mat)) return(NA_real_)
+  if (!(from_state %in% rownames(mat) && to_state %in% colnames(mat))) return(NA_real_)
+  mat[from_state, to_state]
+}
+
+## ------------------------------------------------------------
+## 4. Bootstrap stats: mean diff, CI, and p-value
+## ------------------------------------------------------------
+bootstrap_within_stats <- function(baseline_vals, rct_vals,
+                                   R = 1000, alpha = 0.05) {
+  idx <- which(!is.na(baseline_vals) & !is.na(rct_vals))
+  baseline_vals <- baseline_vals[idx]
+  rct_vals      <- rct_vals[idx]
+
+  if (length(baseline_vals) < 2) {
+    return(list(
+      mean_diff = NA_real_,
+      ci_low    = NA_real_,
+      ci_high   = NA_real_,
+      pval      = NA_real_
+    ))
+  }
+
+  obs_diffs <- rct_vals - baseline_vals
+  obs_mean  <- mean(obs_diffs)
+
+  boot_means <- replicate(R, {
+    samp <- sample(seq_along(obs_diffs), replace = TRUE)
+    mean(obs_diffs[samp])
+  })
+
+  ci <- stats::quantile(boot_means, probs = c(alpha / 2, 1 - alpha / 2), na.rm = TRUE)
+
+  # two-sided p-value based on sign of bootstrap means
+  pval <- 2 * min(
+    mean(boot_means >= 0, na.rm = TRUE),
+    mean(boot_means <= 0, na.rm = TRUE)
+  )
+
+  list(
+    mean_diff = obs_mean,
+    ci_low    = as.numeric(ci[1]),
+    ci_high   = as.numeric(ci[2]),
+    pval      = pval
+  )
+}
+
+## ------------------------------------------------------------
+## 5. Group-level difference matrices and global limits
+## ------------------------------------------------------------
+get_diff_matrix <- function(indiv_wide, trt, age) {
+  subdat <- indiv_wide %>% filter(TrtGroup == trt, Peds_age == age)
+  if (nrow(subdat) == 0) {
+    return(matrix(
+      0,
+      nrow = length(states_order),
+      ncol = length(states_order),
+      dimnames = list(states_order, states_order)
+    ))
+  }
+
+  baseline_mats <- map(subdat$Baseline, align_matrix)
+  rct_mats      <- map(subdat$RCT,      align_matrix)
+
+  mean_base <- average_matrices_ignore_na(baseline_mats)
+  mean_rct  <- average_matrices_ignore_na(rct_mats)
+
+  mean_rct - mean_base
+}
+
+for (trt in c("BP", "Control")) {
+  for (age in c("adults", "children")) {
+    cat("\n--- Difference in transition matrix for", trt, "-", age, "---\n")
+    diff_mat <- get_diff_matrix(indiv_wide, trt, age)
+    print(round(diff_mat, 3))
+  }
+}
+
+age_groups <- c("adults", "children")
+
+limits_by_trt <- list()
+for (trt in c("BP", "Control")) {
+  diff_adults   <- get_diff_matrix(indiv_wide, trt, "adults")
+  diff_children <- get_diff_matrix(indiv_wide, trt, "children")
+  max_val <- max(abs(c(diff_adults, diff_children)), na.rm = TRUE)
+  limits_by_trt[[trt]] <- round(max_val, 3) + 0.01
+}
+
+## ------------------------------------------------------------
+## 6. Marginal probabilities and n from ALL limited-id PtIDs
+## ------------------------------------------------------------
+get_group_marginals <- function(trt, age) {
+  gdat <- iobp2_f2 %>%
+    filter(TrtGroup == trt, Peds_age == age)
+
+  n_group <- n_distinct(gdat$PtID)
+
+  marg <- gdat %>%
+    group_by(Rct_period, Level) %>%
+    summarise(n_points = n(), .groups = "drop_last") %>%
+    mutate(total_points = sum(n_points), prob = n_points / total_points) %>%
+    ungroup()
+
+  baseline_prob <- rep(NA_real_, length(states_order))
+  rct_prob      <- rep(NA_real_, length(states_order))
+  names(baseline_prob) <- names(rct_prob) <- states_order
+
+  for (st in states_order) {
+    baseline_prob[st] <- marg %>%
+      filter(Rct_period == "Baseline", Level == st) %>%
+      summarise(p = ifelse(n() == 0, NA_real_, sum(prob))) %>%
+      pull(p)
+    rct_prob[st] <- marg %>%
+      filter(Rct_period == "RCT", Level == st) %>%
+      summarise(p = ifelse(n() == 0, NA_real_, sum(prob))) %>%
+      pull(p)
+  }
+
+  list(
+    n_group        = n_group,
+    baseline_prob  = baseline_prob,
+    rct_prob       = rct_prob
+  )
+}
+
+## ------------------------------------------------------------
+## 7. Plotting function: show diff, CI, and stars
+## ------------------------------------------------------------
+plot_within_indiv_transition_diff <- function(indiv_wide, trt, age,
+                                              R = 1000, color_limit = NULL) {
+  subdat <- indiv_wide %>% filter(TrtGroup == trt, Peds_age == age)
+  if (nrow(subdat) == 0) return(NULL)
+
+  gm <- get_group_marginals(trt, age)
+  n_group       <- gm$n_group
+  marginal_base <- gm$baseline_prob
+  marginal_rct  <- gm$rct_prob
+
+  baseline_mats <- map(subdat$Baseline, align_matrix)
+  rct_mats      <- map(subdat$RCT,      align_matrix)
+
+  mean_base <- average_matrices_ignore_na(baseline_mats)
+  mean_rct  <- average_matrices_ignore_na(rct_mats)
+
+  fmt_pct <- function(x) sprintf("%.1f%%", 100 * x)
+  y_labels <- sprintf(
+    "%s (%s, %s)",
+    states_order,
+    fmt_pct(marginal_base),
+    fmt_pct(marginal_rct)
+  )
+  names(y_labels) <- states_order
+
+  # Use matrix diff for coloring
+  diff_matrix <- mean_rct - mean_base
+
+  plot_df <- expand.grid(
+    From = states_order,
+    To   = states_order,
+    stringsAsFactors = FALSE
+  ) %>%
+    mutate(
+      Diff    = mapply(function(f, t) diff_matrix[f, t], From, To),
+      Pval    = NA_real_,
+      CI_low  = NA_real_,
+      CI_high = NA_real_
+    )
+
+  for (i in seq_len(nrow(plot_df))) {
+    f <- plot_df$From[i]
+    t <- plot_df$To[i]
+
+    base_vals <- purrr::map_dbl(
+      baseline_mats,
+      extract_transition_value,
+      from_state = f,
+      to_state   = t
+    )
+    rct_vals  <- purrr::map_dbl(
+      rct_mats,
+      extract_transition_value,
+      from_state = f,
+      to_state   = t
+    )
+
+    stats <- bootstrap_within_stats(base_vals, rct_vals, R = R)
+    plot_df$Pval[i]    <- stats$pval
+    plot_df$CI_low[i]  <- stats$ci_low
+    plot_df$CI_high[i] <- stats$ci_high
+  }
+
+  plot_df <- plot_df %>%
+    mutate(
+      Pval_adj = p.adjust(Pval, method = "bonferroni"),
+      Star = ifelse(
+        abs(Diff) < 0.2,
+        "",
+        as.character(cut(
+          Pval_adj,
+          breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+          labels = c("***", "**", "*", ""),
+          right  = TRUE
+        ))
+      ),
+      Label_core = dplyr::case_when(
+        is.na(Diff) | is.na(CI_low) | is.na(CI_high) ~ "",
+        TRUE ~ sprintf("%.3f [%.3f, %.3f]", Diff, CI_low, CI_high)
+      ),
+      Label = dplyr::case_when(
+        Label_core == "" ~ "",
+        Star == ""       ~ Label_core,
+        TRUE             ~ paste0(Label_core, "\n", Star)
+      ),
+      ToShort = short_names[To],
+      From    = factor(From, levels = rev(states_order)),
+      ToShort = factor(ToShort, levels = rev(short_names[states_order]))
+    )
+
+  if (is.null(color_limit)) {
+    color_limit <- max(abs(plot_df$Diff), na.rm = TRUE) %>% round(3) + 0.01
+  }
+
+  ggplot(plot_df, aes(x = ToShort, y = From, fill = Diff)) +
+    geom_tile(color = "white") +
+    geom_text(
+      aes(
+        label  = Label,
+        colour = ifelse(is.na(Diff) | abs(Diff) <= 0.02, "dark", "light")
+      ),
+      size = 3.6,
+      fontface = "bold",
+      lineheight = 0.9,
+      na.rm = TRUE
+    ) +
+    scale_colour_manual(
+      values = c("dark" = "black", "light" = "white"),
+      guide = "none"
+    ) +
+    scale_fill_gradient2(
+      low      = "blue",
+      mid      = "white",
+      high     = "red",
+      midpoint = 0,
+      limits   = c(-color_limit, color_limit),
+      name     = "RCT - Baseline"
+    ) +
+    scale_y_discrete(labels = y_labels[rev(states_order)]) +
+    labs(
+      title = sprintf(
+        "Within-Individual Transition Change: %s, %s (n=%d)",
+        trt, tools::toTitleCase(age), n_group
+      ),
+      x = "To State",
+      y = "From State (Baseline %, RCT %)"
+    ) +
+    theme_minimal(base_size = 15) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.text.y = element_text(size = 15),
+      plot.title  = element_text(size = 16, face = "bold", hjust = 0.5)
+    )
+}
+
+## ------------------------------------------------------------
+## 8. Generate plots for all groups
+## ------------------------------------------------------------
+plots <- list()
+for (trt in c("BP", "Control")) {
+  for (age in age_groups) {
+    plots[[paste(trt, age, sep = "_")]] <-
+      plot_within_indiv_transition_diff(
+        indiv_wide,
+        trt,
+        age,
+        R           = 1000,
+        color_limit = limits_by_trt[[trt]]
+      )
+  }
+}
+
+final_plot <- (plots[["BP_adults"]] | plots[["BP_children"]]) /
+  (plots[["Control_adults"]] | plots[["Control_children"]]) +
+  patchwork::plot_annotation(
+    title    = "Within-Individual Changes in Transition Probabilities (RCT - Baseline)",
+    subtitle = "Each cell shows the mean difference (RCT − Baseline) and 95% bootstrap CI in the form x[a, b];\nBonferroni-adjusted significance is indicated by *, **, ***."
+  )
+
+final_plot
+ggsave("./figure1/transition_probability_diff_RCT_vs_Baseline_PtID_2weeks_ci.png",final_plot, width = 27, height = 12, dpi = 300)
+
+```
+
+### Missing states need to mention
+```{r}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(lubridate)
+
+# 1. Define the full set of states (long order)
+states_order_long <- c(
+  "Level 2 hypoglycemia",
+  "Level 1 hypoglycemia",
+  "In range",
+  "Level 1 hyperglycemia",
+  "Level 2 hyperglycemia"
+)
+
+# 2. Build analysis dataset with Period and Level
+iobp2_states <- iobp2 %>%
+  filter(PtID %in% limited_id) %>%
+  mutate(
+    Period = case_when(
+      DeviceDtTm < RandDt ~ "Baseline",
+      DeviceDtTm >= RandDt & DeviceDtTm < RandDt + weeks(12) ~ "RCT",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Period)) %>%
+  mutate(
+    Level = factor(
+      case_when(
+        Value >= 250 ~ "Level 2 hyperglycemia",
+        Value >= 181 ~ "Level 1 hyperglycemia",
+        Value >= 70  ~ "In range",
+        Value >= 54  ~ "Level 1 hypoglycemia",
+        Value <  54  ~ "Level 2 hypoglycemia"
+      ),
+      levels = states_order_long
+    )
+  )
+
+# 3. For each PtID × Period, find which states never appear
+missing_states_tbl <- iobp2_states %>%
+  group_by(PtID, TrtGroup, Peds_age, Period) %>%
+  summarise(
+    states_present = list(unique(as.character(Level))),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    MissingState = map(states_present, ~ setdiff(states_order_long, .x))
+  ) %>%
+  select(-states_present) %>%
+  unnest(MissingState) %>%        # one row per missing state
+  arrange(Peds_age, TrtGroup, PtID, Period, MissingState)
+
+# 4. Inspect the result
+missing_states_tbl %>% kable()
+
+```
+
+
+
+### Table
+```{r, eval=FALSE}
+dir_folder = "cgm data/IOBP2_data/"
+HB_results <- read.delim(paste0(dir_folder, "STASampleResults.txt"), sep = "|", header = TRUE, stringsAsFactors = FALSE) %>% filter(ResultName == "GLYHB")
+
+
+HB_results[,c(2,3,7)] %>% filter(PtID %in% limited_id ) %>%
+  pivot_wider(names_from = Visit, values_from = Value) %>%
+  left_join(PtRoster[,c(2,5,7,8)]) %>%
+  filter(TrtGroup != "BPFiasp") %>%
+  mutate(Peds_age = if_else(AgeAsofEnrollDt >= 18, "adults", "children")) %>%
+  group_by(TrtGroup, Peds_age) %>%
+  mutate(
+    Randomization = as.numeric(Randomization),
+    `Week 6` = as.numeric(`Week 6`),
+    `Week 13` = as.numeric(`Week 13`)
+  ) %>%
+  summarise(
+    random = sprintf("%.3f (%.3f)", mean(Randomization, na.rm = TRUE), sd(Randomization, na.rm = TRUE)),
+    week_6 = sprintf("%.3f (%.3f)", mean(`Week 6`, na.rm = TRUE), sd(`Week 6`, na.rm = TRUE)),
+    week_13 = sprintf("%.3f (%.3f)", mean(`Week 13`, na.rm = TRUE), sd(`Week 13`, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+
+hb_wide <- HB_results[,c(2,3,7)] %>% filter(PtID %in% limited_id ) %>%
+  pivot_wider(names_from = Visit, values_from = Value) %>%
+  left_join(PtRoster[,c(2,5,7,8)]) %>%
+  filter(TrtGroup != "BPFiasp") %>%
+  mutate(Peds_age = if_else(AgeAsofEnrollDt >= 18, "adults", "children")) %>%
+  mutate(
+    Randomization = as.numeric(Randomization),
+    `Week 6` = as.numeric(`Week 6`),
+    `Week 13` = as.numeric(`Week 13`)
+  )
+
+# Function to get p-value for a variable by age group
+get_pval <- function(var, age_group) {
+  dat <- hb_wide %>% filter(Peds_age == age_group)
+  wilcox.test(as.formula(paste(var, "~ TrtGroup")), data = dat)$p.value
+}
+
+# Adults
+pval_adults_rand <- get_pval("Randomization", "adults")
+pval_adults_week6 <- get_pval("`Week 6`", "adults")
+pval_adults_week13 <- get_pval("`Week 13`", "adults")
+
+# Children
+pval_children_rand <- get_pval("Randomization", "children")
+pval_children_week6 <- get_pval("`Week 6`", "children")
+pval_children_week13 <- get_pval("`Week 13`", "children")
+
+# Print out all p-values rounded
+cat("Adults Randomization p-value:", format.pval(pval_adults_rand, digits=3), "\n")
+cat("Adults Week 6 p-value:", format.pval(pval_adults_week6, digits=3), "\n")
+cat("Adults Week 13 p-value:", format.pval(pval_adults_week13, digits=3), "\n\n")
+cat("Children Randomization p-value:", format.pval(pval_children_rand, digits=3), "\n")
+cat("Children Week 6 p-value:", format.pval(pval_children_week6, digits=3), "\n")
+cat("Children Week 13 p-value:", format.pval(pval_children_week13, digits=3), "\n")
+
+
+```
+
+
+### weilcoxon test
+
+```{r new-with GRI, fig.height=10, fig.width=10, eval=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(iglu)
+
+iobp2_f1_rct <- rct %>%
+  filter(PtID %in% bigger_id) %>%
+  group_by(PtID) %>%
+  mutate(
+    Start_time = min(DeviceDtTm),
+    Rct_period = case_when(
+      DeviceDtTm >= Start_time & DeviceDtTm < Start_time + weeks(12) ~ "RCT",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(Rct_period)) %>%
+  mutate(
+    Peds_age = if_else(AgeAsofEnrollDt >= 18, "adults", "children")
+  ) %>%
+  dplyr::select(PtID, DeviceDtTm, Value, RandDt, TrtGroup, Peds_age, Rct_period) %>%
+  mutate(
+    Level = factor(
+      case_when(
+        Value >= 250 ~ "Level 2 hyperglycemia",
+        Value >= 181 ~ "Level 1 hyperglycemia",
+        Value >= 70  ~ "In range",
+        Value >= 54  ~ "Level 1 hypoglycemia",
+        Value <  54  ~ "Level 2 hypoglycemia"
+      ),
+      levels = c(
+        "Level 2 hypoglycemia", "Level 1 hypoglycemia", "In range",
+        "Level 1 hyperglycemia", "Level 2 hyperglycemia"
+      )
+    )
+  )
+
+# Prepare data for iglu package
+iglu_ready_data <- iobp2_f1_rct %>%
+  rename(id = PtID, time = DeviceDtTm, gl = Value)
+
+# Mean, SD, CV, percent in/out of ranges, and GRI per participant
+metrics_df <- iglu_ready_data %>%
+  group_by(id) %>%
+  summarise(
+    mean_glucose   = mean(gl, na.rm = TRUE),
+    sd_glucose     = sd(gl, na.rm = TRUE),
+    cv_glucose     = 100 * sd(gl, na.rm = TRUE) / mean(gl, na.rm = TRUE),
+    pct_below_70   = mean(gl < 70, na.rm = TRUE) * 100,
+    pct_below_54   = mean(gl < 54, na.rm = TRUE) * 100,
+    pct_in_70_180  = mean(gl >= 70 & gl <= 180, na.rm = TRUE) * 100,
+    pct_above_180  = mean(gl > 180, na.rm = TRUE) * 100,
+    pct_above_250  = mean(gl > 250, na.rm = TRUE) * 100,
+    # components for GRI
+    pct_L2Hypo     = mean(gl < 54, na.rm = TRUE) * 100,
+    pct_L1Hypo     = mean(gl >= 54 & gl < 70, na.rm = TRUE) * 100,
+    pct_L1Hyper    = mean(gl > 180 & gl <= 250, na.rm = TRUE) * 100,
+    pct_L2Hyper    = mean(gl > 250, na.rm = TRUE) * 100,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    GRI = 3.0 * (pct_L2Hypo + 0.8 * pct_L1Hypo) +
+          1.6 * (pct_L2Hyper + 0.5 * pct_L1Hyper)
+  )
+
+# Calculate MODD and MAGE
+modd_results <- modd(iglu_ready_data)
+mage_results <- mage(iglu_ready_data)
+
+# Join MODD, MAGE, and GRI results
+iglu_metrics <- modd_results %>%
+  left_join(mage_results, by = "id")
+
+# Add participant metadata
+participant_info <- iglu_ready_data %>%
+  distinct(id, TrtGroup, Rct_period, Peds_age)
+
+iglu_metrics <- iglu_metrics %>%
+  left_join(participant_info, by = "id") %>%
+  left_join(metrics_df, by = "id")
+
+# Transition probabilities calculation
+transitions_results <- iobp2_f1_rct %>%
+  group_by(PtID, TrtGroup, Rct_period, Peds_age) %>%
+  do(transitionMatrix = calculate_transitions2(.)) %>%
+  ungroup()
+
+# Combine everything into one final data frame
+final_results <- transitions_results %>%
+  rename(id = PtID) %>%
+  left_join(iglu_metrics, by = c("id", "TrtGroup", "Rct_period", "Peds_age")) %>%
+  left_join(
+    HB_results[, c(2, 3, 7)] %>%
+      pivot_wider(names_from = Visit, values_from = Value) %>%
+      rename(id = PtID)
+  ) %>%
+  filter(Rct_period == "RCT") %>%
+  rename(PtID = id) %>%
+  mutate(
+    Randomization = as.numeric(Randomization),
+    `Week 6`      = as.numeric(`Week 6`)
+  )
+
+
+
+# include GRI in the metrics list
+metrics <- c(
+  "MODD", "MAGE", "GRI",
+  "mean_glucose", "sd_glucose", "cv_glucose", "pct_below_54",
+  "pct_below_70", "pct_in_70_180",
+  "pct_above_180", "pct_above_250"
+)
+publication_order <- metrics
+
+metric_labels <- c(
+  "MODD"          = "Mean of Daily Differences (MODD)",
+  "MAGE"          = "Mean Amplitude of Glycemic Excursions (MAGE)",
+  "GRI"           = "Glycemia Risk Index (GRI)",
+  "mean_glucose"  = "Mean Glucose (mg/dL)",
+  "sd_glucose"    = "Standard Deviation (SD, mg/dL)",
+  "cv_glucose"    = "Coefficient of Variation (CV, %)",
+  "pct_below_54"  = "Time <54 mg/dL (%)",
+  "pct_below_70"  = "Time <70 mg/dL (%)",
+  "pct_in_70_180" = "Time in 70–180 mg/dL (%)",
+  "pct_above_180" = "Time >180 mg/dL (%)",
+  "pct_above_250" = "Time >250 mg/dL (%)"
+)
+
+age_groups <- c("adults", "children")
+
+# Wilcoxon test for all, return p-value
+get_wilcox_pvalue <- function(x_bp, x_control) {
+  x_bp <- na.omit(x_bp)
+  x_control <- na.omit(x_control)
+  if (length(x_bp) < 3 | length(x_control) < 3) return(NA)
+  test <- wilcox.test(x_bp, x_control)
+  test$p.value
+}
+
+results <- data.frame()
+
+for (age in age_groups) {
+  df <- final_results %>% filter(Peds_age == age)
+  for (metric in metrics) {
+    vals_bp   <- df %>% filter(TrtGroup == "BP") %>% pull(metric)
+    vals_ctrl <- df %>% filter(TrtGroup == "Control") %>% pull(metric)
+    pval      <- get_wilcox_pvalue(vals_bp, vals_ctrl)
+    med_bp    <- median(vals_bp, na.rm = TRUE)
+    med_ctrl  <- median(vals_ctrl, na.rm = TRUE)
+    results <- rbind(
+      results,
+      data.frame(
+        Metric        = metric,
+        AgeGroup      = tools::toTitleCase(age),
+        P_value       = pval,
+        TestUsed      = "Wilcoxon",
+        Median_BP     = med_bp,
+        Median_Control= med_ctrl
+      )
+    )
+  }
+}
+
+results$Significance  <- ifelse(results$P_value < 0.05, "Significant", "Not significant")
+results$Metric        <- factor(results$Metric, levels = metrics)
+results$Metric_pretty <- factor(
+  metric_labels[as.character(results$Metric)],
+  levels = rev(metric_labels[publication_order])
+)
+
+# Directionality: Square = higher in BP; Circle = higher in Control
+results$Higher_in <- ifelse(results$Median_BP > results$Median_Control, "BP", "Control")
+results$Shape     <- ifelse(results$Higher_in == "BP", 15, 16) # 15=square, 16=circle
+
+forest_plot2 <- ggplot(
+  results,
+  aes(x = P_value, y = Metric_pretty, color = Significance, shape = factor(Shape))
+) +
+  geom_point(size = 4) +
+  scale_shape_manual(
+    values = c(`15` = 15, `16` = 16),
+    labels = c("■ Higher in BP", "● Higher in Control")
+  ) +
+  geom_vline(xintercept = 0.05, linetype = "dashed", color = "blue") +
+  facet_wrap(~AgeGroup, ncol = 2) +
+  scale_color_manual(values = c("Significant" = "red", "Not significant" = "black")) +
+  labs(
+    title    = "Comparison of Glycemic Metrics: BP vs Control (by Age Group)",
+    subtitle = "All p-values from Wilcoxon tests; ■ higher in BP, ● higher in Control; dashed line at p=0.05",
+    x = "P-value", y = NULL, shape = NULL
+  ) +
+  xlim(0, 1) +
+  theme_bw(base_size = 15) +
+  theme(
+    plot.title      = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle   = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    strip.background= element_rect(fill = "grey95", color = "black"),
+    axis.text.y     = element_text(size = 13)
+  )
+
+ggsave(
+  "./figure1/ForestPlot_ALL_Test_Pvalues_Wilcoxon_diff.png",
+  plot   = forest_plot2,
+  width  = 14,
+  height = 8,
+  dpi    = 300
+)
+saveRDS(final_results, "ALL_Test_metrics.rds")
+
+forest_plot2
+
+
+```
+
+
+
+### Forest - p-value
+```{r new-metcis, fig.height=10, fig.width=10, eval=FALSE}
+### Forest - p-value
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+metrics <- c(
+  "MODD", "MAGE", "mean_glucose", "sd_glucose", "cv_glucose",
+  "pct_below_70", "pct_below_54", "pct_in_70_180", "pct_above_180", "pct_above_250"
+)
+age_groups <- c("adults", "children")
+
+# Function to pick test and return p-value
+get_pvalue <- function(x_bp, x_control) {
+  # Remove NAs
+  x_bp <- na.omit(x_bp)
+  x_control <- na.omit(x_control)
+  if(length(x_bp) < 3 | length(x_control) < 3) return(NA) # Too few data
+  # Shapiro for both groups (normal if p > 0.05)
+  normal_bp <- tryCatch(shapiro.test(x_bp)$p.value > 0.05, error = function(e) FALSE)
+  normal_ctrl <- tryCatch(shapiro.test(x_control)$p.value > 0.05, error = function(e) FALSE)
+  if (normal_bp && normal_ctrl) {
+    test <- t.test(x_bp, x_control)
+    return(test$p.value)
+  } else {
+    test <- wilcox.test(x_bp, x_control)
+    return(test$p.value)
+  }
+}
+
+results <- data.frame()
+
+for (age in age_groups) {
+  df <- final_results %>% filter(Peds_age == age)
+  for (metric in metrics) {
+    vals_bp <- df %>% filter(TrtGroup == "BP") %>% pull(metric)
+    vals_ctrl <- df %>% filter(TrtGroup == "Control") %>% pull(metric)
+    pval <- get_pvalue(vals_bp, vals_ctrl)
+    results <- rbind(results, data.frame(
+      Metric = metric,
+      AgeGroup = tools::toTitleCase(age),
+      P_value = pval
+    ))
+  }
+}
+
+results$Significance <- ifelse(results$P_value < 0.05, "Significant", "Not significant")
+results$Metric <- factor(results$Metric, levels = metrics)
+
+metric_labels <- c(
+  "MODD" = "Mean of Daily Differences (MODD)",
+  "MAGE" = "Mean Amplitude of Glycemic Excursions (MAGE)",
+  "mean_glucose" = "Mean Glucose (mg/dL)",
+  "sd_glucose" = "Standard Deviation (SD, mg/dL)",
+  "cv_glucose" = "Coefficient of Variation (CV, %)",
+  "pct_below_70" = "Time <70 mg/dL (%)",
+  "pct_below_54" = "Time <54 mg/dL (%)",
+  "pct_in_70_180" = "Time in 70–180 mg/dL (%)",
+  "pct_above_180" = "Time >180 mg/dL (%)",
+  "pct_above_250" = "Time >250 mg/dL (%)"
+)
+
+# Order: variability metrics, then mean/SD/CV, then %s (low to high)
+publication_order <- c(
+  "MODD", "MAGE",
+  "mean_glucose", "sd_glucose", "cv_glucose",
+  "pct_below_70", "pct_below_54", "pct_in_70_180", "pct_above_180", "pct_above_250"
+)
+
+results$Metric_pretty <- metric_labels[as.character(results$Metric)]
+results$Metric_pretty <- factor(results$Metric_pretty, levels = metric_labels[publication_order])
+# Reverse order so the most important metric is at the top:
+results$Metric_pretty <- factor(results$Metric_pretty, levels = rev(levels(results$Metric_pretty)))
+
+forest_plot2 <- ggplot(results, aes(x = P_value, y = Metric_pretty, color = Significance)) +
+  geom_point(size = 4, shape = 18) +
+  geom_vline(xintercept = 0.05, linetype = "dashed", color = "blue") +
+  facet_wrap(~AgeGroup, ncol = 2) +
+  scale_color_manual(values = c("Significant" = "red", "Not significant" = "black")) +
+  labs(
+    title = "Comparison of Glycemic Metrics: BP vs Control (by Age Group) - Test Statistics",
+    subtitle = "Dashed line indicates p-value = 0.05 threshold",
+    x = "P-value", y = NULL
+  ) +
+  xlim(0, 1) +
+  theme_bw(base_size = 15) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    strip.background = element_rect(fill = "grey95", color = "black"),
+    axis.text.y = element_text(size = 13)
+  )
+
+ggsave("./figure1/ForestPlot_ALL_Test_Pvalues.png",
+       plot = forest_plot2,
+       width = 14, height = 8, dpi = 300)
+
+forest_plot2
+
+
+```
+
+
+### Hist check for test
+### Hist check for test
+```{r new hist, fig.height=20, fig.width=6, eval=FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+library(ggpubr)
+# library(patchwork) # if not already loaded for wrap_plots()
+
+metrics <- c(
+  "MODD", "MAGE", "GRI",
+  "mean_glucose", "sd_glucose", "cv_glucose",
+  "pct_below_70", "pct_below_54",
+  "pct_in_70_180", "pct_above_180", "pct_above_250"
+)
+age_groups <- c("adults", "children")
+
+metric_labels <- c(
+  "MODD"          = "Mean of Daily Differences (MODD)",
+  "MAGE"          = "Mean Amplitude of Glycemic Excursions (MAGE)",
+  "GRI"           = "Glycemia Risk Index (GRI, unitless)",
+  "mean_glucose"  = "Mean Glucose (mg/dL)",
+  "sd_glucose"    = "Standard Deviation (SD, mg/dL)",
+  "cv_glucose"    = "Coefficient of Variation (CV, %)",
+  "pct_below_70"  = "Time <70 mg/dL (%)",
+  "pct_below_54"  = "Time <54 mg/dL (%)",
+  "pct_in_70_180" = "Time in 70–180 mg/dL (%)",
+  "pct_above_180" = "Time >180 mg/dL (%)",
+  "pct_above_250" = "Time >250 mg/dL (%)"
+)
+
+colors <- c("BP" = "#4E79A7", "Control" = "#F28E2B")
+
+plot_list <- list()
+
+# Generate histograms with embedded Shapiro–Wilk test results
+for (metric in metrics) {
+  for (age in age_groups) {
+    subdat <- final_results %>%
+      filter(Peds_age == age) %>%
+      select(TrtGroup, value = all_of(metric)) %>%
+      na.omit()
+
+    # Compute Shapiro–Wilk p-values
+    shapiro_pvals <- subdat %>%
+      group_by(TrtGroup) %>%
+      summarise(
+        p_value = if (n() >= 3) shapiro.test(value)$p.value else NA_real_
+      ) %>%
+      mutate(
+        normality = ifelse(p_value > 0.05, "Normal", "Not normal"),
+        label = paste0(TrtGroup, ": p = ", round(p_value, 3),
+                       " (", normality, ")")
+      )
+
+    label_text <- paste(shapiro_pvals$label, collapse = "\n")
+
+    p <- ggplot(subdat, aes(x = value, fill = TrtGroup)) +
+      geom_histogram(
+        aes(y = ..density..),
+        alpha = 0.6, color = "grey20", position = "identity"
+      ) +
+      scale_fill_manual(values = colors) +
+      labs(
+        title = metric_labels[[metric]],
+        subtitle = paste0("Age Group: ", tools::toTitleCase(age)),
+        x = metric_labels[[metric]],
+        y = "Density"
+      ) +
+      theme_classic(base_size = 13) +
+      theme(
+        legend.position = "top",
+        plot.title = element_text(face = "bold", size = 12),
+        plot.subtitle = element_text(size = 10),
+        axis.text = element_text(size = 9)
+      ) +
+      annotate(
+        "text",
+        x = Inf, y = Inf,
+        label = label_text,
+        hjust = 1.05, vjust = 1.05,
+        size = 2.8,
+        color = "black"
+      )
+
+    plot_list[[paste(metric, age)]] <- p
+  }
+}
+
+# Arrange plots into a grid
+kk <- wrap_plots(plot_list, ncol = 4, byrow = TRUE) +
+  plot_annotation(
+    title = "Distribution of Glycemic Metrics by Treatment Group and Age",
+    subtitle = "Histograms for bionic pancreas (BP) and control, stratified by adults and children. Shapiro–Wilk p-values for normality are annotated in each panel."
+  )
+
+ggsave(
+  "./figure1/Hist_ALL_Test_Pvalues.png",
+  plot = kk,
+  width = 15, height = 24, dpi = 300
+)
+
+kk
+
+```
+
+### States missingness check
+
+```{r state_coverage_bigger_limited}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(purrr)
+
+# ------------------------------------------------------------
+# 1. Define states and helper variables
+# ------------------------------------------------------------
+states_order_long <- c(
+  "Level 2 hypoglycemia",
+  "Level 1 hypoglycemia",
+  "In range",
+  "Level 1 hyperglycemia",
+  "Level 2 hyperglycemia"
+)
+
+# ------------------------------------------------------------
+# 2. Build iobp2 with Baseline / RCT, age group, and state
+# ------------------------------------------------------------
+iobp2_periods <- iobp2 %>%
+  # Restrict to 12 weeks after randomization (same horizon as transitions)
+  filter(DeviceDtTm < RandDt + weeks(12)) %>%
+  mutate(
+    Rct_period = case_when(
+      DeviceDtTm < RandDt ~ "Baseline",
+      DeviceDtTm >= RandDt & DeviceDtTm < RandDt + weeks(12) ~ "RCT",
+      TRUE ~ NA_character_
+    ),
+    Peds_age = if_else(AgeAsofEnrollDt >= 18, "adults", "children"),
+    Level = factor(
+      case_when(
+        Value >= 250 ~ "Level 2 hyperglycemia",
+        Value >= 181 ~ "Level 1 hyperglycemia",
+        Value >= 70  ~ "In range",
+        Value >= 54  ~ "Level 1 hypoglycemia",
+        Value <  54  ~ "Level 2 hypoglycemia"
+      ),
+      levels = states_order_long
+    )
+  ) %>%
+  filter(!is.na(Rct_period))
+
+# ------------------------------------------------------------
+# 3. Function: coverage summary for a given ID set
+# ------------------------------------------------------------
+summarise_state_coverage <- function(data, id_vec, set_name) {
+  data %>%
+    filter(PtID %in% id_vec) %>%
+    # Keep only rows with a defined state
+    filter(!is.na(Level)) %>%
+    # Build PtID x period x trt x age x state table (with missing states filled)
+    group_by(PtID, Peds_age, TrtGroup, Rct_period, Level) %>%
+    summarise(has_state = n() > 0, .groups = "drop") %>%
+    group_by(PtID, Peds_age, TrtGroup, Rct_period) %>%
+    complete(Level = states_order_long, fill = list(has_state = FALSE)) %>%
+    ungroup() %>%
+    group_by(Peds_age, TrtGroup, Rct_period, Level) %>%
+    summarise(
+      N_total_group      = n_distinct(PtID),                 # total PtID in this group
+      N_never_enter_state = sum(!has_state, na.rm = TRUE),   # PtID that never entered this state
+      .groups = "drop"
+    ) %>%
+    mutate(Set = set_name) %>%
+    # order factors for nicer output
+    mutate(
+      Rct_period = factor(Rct_period, levels = c("Baseline", "RCT")),
+      Peds_age   = factor(Peds_age, levels = c("adults", "children")),
+      Level      = factor(Level, levels = states_order_long)
+    ) %>%
+    arrange(Set, Peds_age, TrtGroup, Rct_period, Level)
+}
+
+# ------------------------------------------------------------
+# 4. Apply to bigger_id and limited_id and combine
+# ------------------------------------------------------------
+coverage_bigger  <- summarise_state_coverage(iobp2_periods, bigger_id,  "bigger_id")
+coverage_limited <- summarise_state_coverage(iobp2_periods, limited_id, "limited_id")
+
+coverage_summary <- bind_rows(coverage_bigger, coverage_limited)
+
+# View the result
+coverage_summary %>% filter(Set == "bigger_id") %>% filter(N_never_enter_state > 0) %>% arrange(Peds_age, TrtGroup, Rct_period, Level) 
+
+coverage_summary %>% filter(Set == "limited_id") %>% filter(N_never_enter_state > 0) %>% arrange(Peds_age, TrtGroup, Rct_period, Level) 
+```
+
+
+
+### Supplemental 1 
+
+### Supplemental 2
+
+### Supplemental 3
